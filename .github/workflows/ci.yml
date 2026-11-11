@@ -1,0 +1,29 @@
+name: StarShield Deterministic CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install modern build tooling
+        run: python -m pip install --upgrade pip "setuptools>=77" wheel
+      - name: Run positive, adversarial & malformed-input unit tests
+        run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m unittest discover -s tests -v
+      - name: Build wheel and verify installed CLI entrypoint outside repo tree
+        run: |
+          python -m pip wheel . --no-deps -w dist/
+          python -m pip install dist/*.whl
+          cd /tmp && starshield demo > /tmp/demo_out.json
+          python -c "import json; d=json.load(open('/tmp/demo_out.json')); assert d['engine_1_raw_leveldb_wal_carver']['corrupted_frames_count'] == 0"

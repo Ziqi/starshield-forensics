@@ -1,0 +1,73 @@
+{
+  "_meta": {
+    "dataset": "StarShield v0.3.5 Clean-Room Specification Fixture (Fictional 2025 UK Supplier Invoice Scenario)",
+    "tlp": "TLP:CLEAR",
+    "clean_room_provenance": "Independently authored specification test vectors using ISO-13616 official example IBANs (GB82WEST12345698765432, NO9386011117947), RFC/ISO Luhn check-digit test strings (6200000000000005), synthetic test sort code 00-00-00, and arbitrary 2025-03-18 timestamps (post-PSR SD20 effective date). Zero correspondence to any real person, organization, or incident."
+  },
+  "subject_sender_id": "user:accounts_payable_02",
+  "messages": [
+    {
+      "id": "spec_msg_2025_01",
+      "from": "user:impersonated_supplier_01",
+      "composetime": "2025-03-18T10:00:00Z",
+      "content": "Please remit Invoice INV-2025-0100 (GBP 18,400.00) via UK Faster Payments to Sort Code 00-00-00 Account 00000000 or reserve IBAN GB82WEST12345698765432 (SWIFT routing NWBKGB2LXXX).",
+      "properties": {
+        "deletetime": "1742292600000"
+      }
+    },
+    {
+      "id": "spec_msg_2025_02",
+      "from": "user:accounts_payable_02",
+      "composetime": "2025-03-18T10:02:00Z",
+      "content": "Received"
+    },
+    {
+      "id": "spec_msg_2025_03",
+      "from": "user:accounts_payable_02",
+      "composetime": "2025-03-18T10:05:00Z",
+      "content": "Checking PDF"
+    },
+    {
+      "id": "spec_msg_2025_04",
+      "from": "user:impersonated_supplier_01",
+      "composetime": "2025-03-18T11:30:00Z",
+      "content": "Updated secondary IBAN NO9386011117947. Please attend WORKSHOP review on 20250401.",
+      "properties": {
+        "deletetime": "1742298000000",
+        "edittime": "1742297700000"
+      }
+    },
+    {
+      "id": "spec_msg_2025_05",
+      "from": "user:accounts_payable_02",
+      "composetime": "2025-03-18T11:32:00Z",
+      "content": "Queued now"
+    },
+    {
+      "id": "spec_msg_2025_06",
+      "from": "user:impersonated_supplier_01",
+      "composetime": "2025-03-18T14:30:00Z",
+      "content": "Luhn test card 6200000000000005 vs invalid check-digit candidate 6200000000000001.",
+      "properties": {
+        "deletetime": "1742308800000"
+      }
+    }
+  ],
+  "session_metadata": [
+    {
+      "session_id": "spec-sess-01",
+      "edge_pop_tag": "pop-eu-west-example-01"
+    },
+    {
+      "session_id": "spec-sess-02",
+      "edge_pop_tag": "pop-us-east-example-02"
+    }
+  ],
+  "timestamp_pairs": [
+    {
+      "label": "synthetic_attachment_ack_interval",
+      "start_utc": "2025-03-18T10:00:00.000Z",
+      "end_utc": "2025-03-18T10:00:45.000Z"
+    }
+  ]
+}
