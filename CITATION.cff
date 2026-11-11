@@ -8,7 +8,8 @@ authors:
 repository-code: "https://github.com/Ziqi/starshield-forensics"
 url: "https://ziqi.github.io/starshield/"
 version: "0.3.5"
-date-released: "2026-11-11"
+doi: "10.5281/zenodo.24145805"
+date-released: "2026-11-12"
 license: "MIT"
 keywords:
   - "digital-forensics"

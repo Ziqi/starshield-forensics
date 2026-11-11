@@ -2,7 +2,7 @@
 
 > **Deterministic Chromium IndexedDB / LevelDB `.log` Record Carver, Structural Image Container Inspector & Financial Checksum Validator**
 >
-> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **License:** MIT · **Status:** Alpha Research Prototype · **Runtime:** Python >= 3.9 (stdlib only, zero network calls, zero LLM dependencies)
+> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **DOI:** [`10.5281/zenodo.24145805`](https://doi.org/10.5281/zenodo.24145805) · **License:** MIT · **Status:** Alpha Research Prototype · **Runtime:** Python >= 3.9 (stdlib only, zero network calls, zero LLM dependencies)
 
 ---
 

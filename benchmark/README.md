@@ -1,7 +1,7 @@
 # `StarShield-Bench-24` (`v1.0.0` · Paired with `starshield-forensics v0.3.5`)
 
 > **24-Case Deterministic Evidentiary Triage & Adversarial Prompt-Injection Benchmark**  
-> **Author:** Ziqi Xiao (`@Ziqi`) · **License:** MIT · **Classification:** `TLP:CLEAR (100% Synthetic)`
+> **Author:** Ziqi Xiao (`@Ziqi`) · **DOI:** [`10.5281/zenodo.24145805`](https://doi.org/10.5281/zenodo.24145805) · **License:** MIT · **Classification:** `TLP:CLEAR (100% Synthetic)`
 
 ---
 
@@ -37,9 +37,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 benchmark_suite.py --output-dir ./artifacts
 
 ---
 
-## 3. Minting Your Official Academic DOI via Zenodo (3-Minute Setup After GitHub Push)
+## 3. Official Zenodo Archival & Academic Citation (`10.5281/zenodo.24145805`)
 
-1. Copy `CITATION.cff` and `benchmark_suite.py` into your public `starshield-forensics` repository root (or `benchmark/` subfolder) when publishing `v0.3.5`.
-2. Sign in to **[https://zenodo.org](https://zenodo.org)** using your GitHub account (`@Ziqi`).
-3. Toggle **ON** the switch next to `Ziqi/starshield-forensics` under *GitHub -> Repositories*.
-4. Create GitHub Release tag `v0.3.5` — Zenodo automatically archives the release and issues a permanent **`10.5281/zenodo.XXXXXXX` DOI badge** for academic papers, NLnet grant reviews, and law-firm technical due diligence.
+`starshield-forensics v0.3.5` and `StarShield-Bench-24 v1.0.0` are permanently archived at CERN / Zenodo:
+- **Permanent DOI:** [`https://doi.org/10.5281/zenodo.24145805`](https://doi.org/10.5281/zenodo.24145805)
+- **Zenodo Record:** [`https://zenodo.org/records/24145805`](https://zenodo.org/records/24145805)
+- **Machine-Readable Citation:** See [`CITATION.cff`](../CITATION.cff) in the repository root.
