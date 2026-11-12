@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Clean-Room Adversarial, Malformed-Input & Privacy Regression Suite for `starshield-forensics` v0.3.5.
+Clean-Room Adversarial, Malformed-Input, Multi-Schema & Privacy Regression Suite for `starshield-forensics` v0.3.6.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from starshield.ioc_validators import (
     mask_identifier,
 )
 from starshield.leveldb_log import (
+    LEVELDB_SSTABLE_MAGIC_LE,
     REC_FIRST,
     REC_FULL,
     build_writebatch,
@@ -391,6 +392,102 @@ class TestAdversarialForensics(unittest.TestCase):
             self.assertNotIn("seCr", masked_txt)
             self.assertNotIn("CANARY_BAD_CRC_PAYLOAD_7719", masked_txt)
             self.assertIn("[CUSTOM_PNG_CHUNK]", masked_txt)
+
+    def test_multi_schema_slack_whatsapp_and_b2b_portal_wal_carving_and_iocs(self) -> None:
+        slack_rec = json.dumps(
+            {
+                "ts": "1742292600.000100",
+                "user": "U099SUPPLIER",
+                "text": "Urgent Slack update: wire to GB82WEST12345698765432",
+                "deleted_ts": "1742293000.000200",
+            }
+        ).encode("utf-8")
+        wa_rec = json.dumps(
+            {
+                "id": "wa_false_001",
+                "from": "447700900000@c.us",
+                "t": 1742292700,
+                "body": "Pay UK Sort Code 00-00-00 Account 00000000 immediately",
+                "is_deleted": True,
+            }
+        ).encode("utf-8")
+        portal_rec = json.dumps(
+            {
+                "invoice_id": "INV-2026-9910",
+                "vendor": "Synthetic Components Ltd",
+                "beneficiary_iban": "NO9386011117947",
+                "amount": "18400.00",
+            }
+        ).encode("utf-8")
+
+        wb = build_writebatch(
+            2001,
+            [
+                (1, b"idb:slack:1", b"\xff\x15" + slack_rec),
+                (1, b"idb:wa:1", b"\xff\x15" + wa_rec),
+                (1, b"idb:portal:1", b"\xff\x15" + portal_rec),
+            ],
+        )
+        wal = encode_leveldb_log_record(REC_FULL, wb)
+
+        # Strict legacy chatsvc filter returns 0 on non-chatsvc schemas
+        strict_chatsvc = parse_leveldb_wal(wal, schema_mode="chatsvc")
+        self.assertEqual(strict_chatsvc["recovered_records_count"], 0)
+
+        # Default auto schema carves all 3 platforms and extracts validated banking IOCs
+        auto_parsed = apply_wal_record_redaction(parse_leveldb_wal(wal, schema_mode="auto"), redact=False)
+        self.assertEqual(auto_parsed["recovered_records_count"], 3)
+        schemas = [r["schema_detected"] for r in auto_parsed["recovered_records"]]
+        self.assertEqual(schemas, ["slack_web", "web_messenger", "b2b_portal_json"])
+        self.assertTrue(auto_parsed["recovered_records"][0]["is_soft_deleted_in_ui"])
+        self.assertTrue(auto_parsed["recovered_records"][1]["is_soft_deleted_in_ui"])
+        self.assertIn("GB82WEST12345698765432", auto_parsed["recovered_records"][0]["extracted_iocs"]["mod97_validated_ibans"])
+        paired_uk = auto_parsed["recovered_records"][1]["extracted_iocs"]["context_paired_uk_accounts"]
+        self.assertEqual(len(paired_uk), 1)
+        self.assertEqual(paired_uk[0]["sort_code"], "00-00-00")
+        self.assertEqual(paired_uk[0]["account_number"], "00000000")
+        self.assertIn("NO9386011117947", auto_parsed["recovered_records"][2]["extracted_iocs"]["mod97_validated_ibans"])
+
+    def test_precheck_go_partial_and_nogo_sstable_without_path_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            go_dir = Path(tmpdir) / "CANARY_CLIENT_DIR_GO_881"
+            go_dir.mkdir()
+            (go_dir / "000003.log").write_bytes(build_synthetic_leveldb_wal_bytes())
+
+            out_go = io.StringIO()
+            with contextlib.redirect_stdout(out_go), contextlib.redirect_stderr(io.StringIO()):
+                rc_go = main(["precheck", str(go_dir)])
+            self.assertEqual(rc_go, 0)
+            self.assertNotIn("CANARY_CLIENT_DIR_GO_881", out_go.getvalue())
+            rep_go = json.loads(out_go.getvalue())["precheck_manifest"]
+            self.assertEqual(rep_go["feasibility_verdict"], "GO")
+            self.assertEqual(rep_go["carvable_json_records_count"], 2)
+            self.assertEqual(rep_go["soft_deleted_json_records_count"], 2)
+
+            # Add a valid LevelDB SSTable (.ldb with 48-byte footer ending in 0xdb4775248b80fb57) -> PARTIAL
+            fake_sstable = b"\x00" * 56 + LEVELDB_SSTABLE_MAGIC_LE
+            (go_dir / "000005.ldb").write_bytes(fake_sstable)
+            out_partial = io.StringIO()
+            with contextlib.redirect_stdout(out_partial), contextlib.redirect_stderr(io.StringIO()):
+                rc_part = main(["precheck", str(go_dir)])
+            self.assertEqual(rc_part, 0)
+            rep_part = json.loads(out_partial.getvalue())["precheck_manifest"]
+            self.assertEqual(rep_part["feasibility_verdict"], "PARTIAL")
+            self.assertEqual(rep_part["verified_leveldb_sstables_count"], 1)
+
+            # Compacted-only directory (no .log records) -> NO_GO_COMPACTED_OR_UNSUPPORTED (£0 fee)
+            nogo_dir = Path(tmpdir) / "CANARY_COMPACTED_ONLY_882"
+            nogo_dir.mkdir()
+            (nogo_dir / "000010.ldb").write_bytes(fake_sstable)
+            out_nogo = io.StringIO()
+            with contextlib.redirect_stdout(out_nogo), contextlib.redirect_stderr(io.StringIO()):
+                rc_nogo = main(["precheck", str(nogo_dir)])
+            self.assertEqual(rc_nogo, 0)
+            self.assertNotIn("CANARY_COMPACTED_ONLY_882", out_nogo.getvalue())
+            rep_nogo = json.loads(out_nogo.getvalue())["precheck_manifest"]
+            self.assertEqual(rep_nogo["feasibility_verdict"], "NO_GO_COMPACTED_OR_UNSUPPORTED")
+            self.assertEqual(rep_nogo["carvable_json_records_count"], 0)
+            self.assertEqual(rep_nogo["verified_leveldb_sstables_count"], 1)
 
 
 if __name__ == "__main__":

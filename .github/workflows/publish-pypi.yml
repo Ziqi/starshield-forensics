@@ -1,0 +1,50 @@
+name: Publish to Official PyPI (OIDC Trusted Publisher)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build "setuptools>=77" wheel
+      - name: Run full adversarial unit test suite & StarShield-Bench-24 gate
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m unittest discover -s tests -v
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python benchmark/benchmark_suite.py
+      - name: Build wheel and POSIX-sanitized sdist
+        run: |
+          python -m build --outdir dist/
+          python - <<'PY'
+          import gzip, io, pathlib, tarfile
+          for sdist in pathlib.Path("dist").glob("*.tar.gz"):
+              src_bytes = sdist.read_bytes()
+              buf = io.BytesIO()
+              with tarfile.open(fileobj=io.BytesIO(src_bytes), mode="r:gz") as tin:
+                  with gzip.GzipFile(filename="", mode="wb", fileobj=buf, mtime=1762819200) as gz:
+                      with tarfile.open(fileobj=gz, mode="w") as tout:
+                          for m in tin.getmembers():
+                              f = tin.extractfile(m) if m.isfile() else None
+                              m.uid = 0
+                              m.gid = 0
+                              m.uname = "root"
+                              m.gname = "root"
+                              m.mtime = 1762819200
+                              tout.addfile(m, f)
+              sdist.write_bytes(buf.getvalue())
+          PY
+      - name: Publish distributions to PyPI via OIDC Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

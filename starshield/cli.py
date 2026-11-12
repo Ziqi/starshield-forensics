@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-StarShield Forensics CLI v0.3.5 (`starshield`)
+StarShield Forensics CLI v0.3.6 (`starshield`)
 Author: Ziqi Xiao (@Ziqi)
 License: MIT
 
@@ -21,6 +21,7 @@ import argparse
 import hashlib
 import hmac
 import html
+import importlib.resources
 import json
 import re
 import secrets
@@ -44,8 +45,12 @@ from starshield.ioc_validators import (
     merge_ioc_dicts,
 )
 from starshield.leveldb_log import (
+    VALID_SCHEMA_MODES,
     build_writebatch,
+    classify_carved_json_object,
     encode_logical_record_across_blocks,
+    inspect_chromium_storage_path,
+    normalize_carved_record_fields,
     parse_leveldb_wal,
 )
 
@@ -153,7 +158,7 @@ def parse_strict_utc_ts(ts: Any) -> float | None:
         val = float(ts)
         return val / 1000.0 if val > 1e11 else val
     s = str(ts).strip()
-    if s.isdigit():
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
         val = float(s)
         return val / 1000.0 if val > 1e11 else val
     try:
@@ -236,12 +241,25 @@ def triage_exported_chatsvc_json(
     payload: Dict[str, Any],
     redact: bool = True,
     salt: bytes | None = None,
+    schema_mode: str = "auto",
 ) -> Dict[str, Any]:
-    if not isinstance(payload, dict) or not isinstance(payload.get("messages", []), list):
-        raise ValueError("Expected JSON object containing a 'messages' list")
+    if schema_mode not in VALID_SCHEMA_MODES:
+        raise ValueError(f"Unsupported schema_mode={schema_mode!r}; expected one of {VALID_SCHEMA_MODES}")
+    if not isinstance(payload, dict):
+        raise ValueError("Expected JSON object containing a 'messages' or 'records' list")
+
+    if "messages" in payload:
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError("Expected 'messages' to be a JSON list")
+    elif "records" in payload:
+        messages = payload.get("records")
+        if not isinstance(messages, list):
+            raise ValueError("Expected 'records' to be a JSON list")
+    else:
+        messages = []
 
     run_salt = salt if salt is not None else secrets.token_bytes(32)
-    messages = payload.get("messages", [])
     retracted: List[Dict[str, Any]] = []
     edited: List[Dict[str, Any]] = []
     corpus_iocs = empty_ioc_dict()
@@ -249,26 +267,31 @@ def triage_exported_chatsvc_json(
     for msg in messages:
         if not isinstance(msg, dict):
             continue
-        props = msg.get("properties") if isinstance(msg.get("properties"), dict) else {}
-        body = strip_markup(msg.get("content", ""))
+        schema_tag = classify_carved_json_object(msg, schema_mode=schema_mode)
+        if schema_mode == "chatsvc" and schema_tag != "chatsvc":
+            continue
+        norm = normalize_carved_record_fields(msg, schema_tag or "generic_json")
+        body = strip_markup(norm["cached_content"])
         # Extract IOCs strictly PER MESSAGE so cross-message numbers never pair!
         msg_iocs = extract_validated_iocs(body, redact=redact, salt=run_salt)
         merge_ioc_dicts(corpus_iocs, msg_iocs)
 
-        delete_ts = props.get("deletetime") or msg.get("deletetime")
-        edit_ts = props.get("edittime") or msg.get("edittime")
-        raw_id = str(msg.get("id", ""))
+        delete_ts = norm["deletetime"]
+        edit_ts = norm["edittime"]
+        raw_id = norm["message_id"]
         rendered_id = redact_msg_id(raw_id, salt=run_salt) if redact else raw_id
-        sender = str(msg.get("from", "unknown"))
+        sender = norm["sender_mri"] or "unknown"
         rendered_sender = mask_identifier(sender, salt=run_salt) if redact else sender
+        comp_ts = norm["composetime"]
 
         if delete_ts:
             retracted.append(
                 {
                     "epistemic_tier": "OBSERVED",
+                    "schema_detected": schema_tag or "generic_json",
                     "id": rendered_id,
                     "sender_mri": rendered_sender,
-                    "compose_time": redact_timestamp(msg.get("composetime")) if redact else msg.get("composetime"),
+                    "compose_time": redact_timestamp(comp_ts) if redact else comp_ts,
                     "delete_time": redact_timestamp(delete_ts) if redact else delete_ts,
                     "cached_plaintext": "[REDACTED_CONTENT — pass --unredacted to view]" if redact else body,
                     "extracted_iocs": msg_iocs,
@@ -278,9 +301,10 @@ def triage_exported_chatsvc_json(
             edited.append(
                 {
                     "epistemic_tier": "OBSERVED",
+                    "schema_detected": schema_tag or "generic_json",
                     "id": rendered_id,
                     "sender_mri": rendered_sender,
-                    "compose_time": redact_timestamp(msg.get("composetime")) if redact else msg.get("composetime"),
+                    "compose_time": redact_timestamp(comp_ts) if redact else comp_ts,
                     "edit_time": redact_timestamp(edit_ts) if redact else edit_ts,
                     "limitation": "Exported JSON retains post-edit content only; pre-edit versions require uncompacted LevelDB sequence history.",
                 }
@@ -288,6 +312,7 @@ def triage_exported_chatsvc_json(
 
     return {
         "input_mode": "exported_message_json",
+        "schema_mode": schema_mode,
         "messages_present_in_input": len(messages),
         "soft_deleted_messages_in_input": len(retracted),
         "edited_messages_in_input": len(edited),
@@ -404,9 +429,11 @@ def summarize_corpus_linguistics(payload: Dict[str, Any]) -> Dict[str, Any]:
     subject_id = payload.get("subject_sender_id", "user:accounts_payable_02")
 
     utterances = [
-        strip_markup(m.get("content", ""))
+        strip_markup(m.get("content") or m.get("text") or m.get("body") or "")
         for m in messages
-        if isinstance(m, dict) and m.get("from") == subject_id and strip_markup(m.get("content", ""))
+        if isinstance(m, dict)
+        and (m.get("from") == subject_id or m.get("user") == subject_id or m.get("sender") == subject_id)
+        and strip_markup(m.get("content") or m.get("text") or m.get("body") or "")
     ]
 
     n = len(utterances)
@@ -481,10 +508,15 @@ def build_synthetic_leveldb_wal_bytes() -> bytes:
 
 def run_demo(redact: bool = True) -> int:
     run_salt = secrets.token_bytes(32)
-    pkg_sample = Path(__file__).resolve().parent / "data" / "synthetic_case_benchmark.json"
-    repo_sample = Path(__file__).resolve().parent.parent / "samples" / "synthetic_case_benchmark.json"
-    sample_path = pkg_sample if pkg_sample.is_file() else repo_sample
-    sample_json_bytes = sample_path.read_bytes()
+    try:
+        sample_json_bytes = (
+            importlib.resources.files("starshield.data")
+            .joinpath("synthetic_case_benchmark.json")
+            .read_bytes()
+        )
+    except Exception:
+        repo_sample = Path(__file__).resolve().parent.parent / "samples" / "synthetic_case_benchmark.json"
+        sample_json_bytes = repo_sample.read_bytes()
     payload = json.loads(sample_json_bytes.decode("utf-8"))
 
     wal_bytes = build_synthetic_leveldb_wal_bytes()
@@ -545,11 +577,35 @@ def main(argv: List[str] | None = None) -> int:
 
     sub.add_parser("demo", help="Run deterministic triage pipeline on clean-room specification test vectors")
 
+    p_pre = sub.add_parser(
+        "precheck",
+        help="Zero-PII local GO/PARTIAL/NO-GO feasibility check on a Chromium storage folder or .log/.ldb file",
+    )
+    p_pre.add_argument("target_path", type=Path, help="Read-only Chromium IndexedDB/LevelDB folder or .log/.ldb file")
+    p_pre.add_argument(
+        "--schema",
+        choices=VALID_SCHEMA_MODES,
+        default="auto",
+        help="JSON record schema filter (default: auto — supports Teams/Skype, Slack, WhatsApp Web & B2B portals)",
+    )
+
     p_wal = sub.add_parser("parse-leveldb-log", help="Parse Chromium IndexedDB LevelDB .log file with byte offsets & CRC32C")
     p_wal.add_argument("log_file", type=Path, help="Read-only copy of LevelDB .log write-ahead log")
+    p_wal.add_argument(
+        "--schema",
+        choices=VALID_SCHEMA_MODES,
+        default="auto",
+        help="JSON record schema filter (default: auto — supports Teams/Skype, Slack, WhatsApp Web & B2B portals)",
+    )
 
     p_rec = sub.add_parser("triage-json", help="Triage exported message JSON for soft-deleted records & validated IOCs")
     p_rec.add_argument("json_file", type=Path, help="Path to exported message JSON")
+    p_rec.add_argument(
+        "--schema",
+        choices=VALID_SCHEMA_MODES,
+        default="auto",
+        help="JSON record schema filter (default: auto)",
+    )
 
     p_sig = sub.add_parser("corroborate-timestamps", help="Verify timezone-aware UTC intervals and session metadata")
     p_sig.add_argument("json_file", type=Path, help="Path to timestamp/session JSON")
@@ -568,9 +624,23 @@ def main(argv: List[str] | None = None) -> int:
         if args.command == "demo":
             return run_demo(redact=redact)
 
+        if args.command == "precheck":
+            pre_report = inspect_chromium_storage_path(
+                args.target_path,
+                max_mb=args.max_mb,
+                schema_mode=args.schema,
+                redact=redact,
+            )
+            print(json.dumps({"precheck_manifest": pre_report}, indent=2, ensure_ascii=False))
+            return 0
+
         if args.command == "parse-leveldb-log":
             raw = read_bounded_bytes(args.log_file, args.max_mb, redact=redact)
-            parsed = apply_wal_record_redaction(parse_leveldb_wal(raw), redact=redact, salt=run_salt)
+            parsed = apply_wal_record_redaction(
+                parse_leveldb_wal(raw, schema_mode=args.schema),
+                redact=redact,
+                salt=run_salt,
+            )
             out = {
                 "acquisition_manifest": build_acquisition_manifest(raw, args.log_file.name, redact=redact),
                 "leveldb_wal_analysis": parsed,
@@ -583,7 +653,12 @@ def main(argv: List[str] | None = None) -> int:
             data = json.loads(raw.decode("utf-8"))
             out = {
                 "acquisition_manifest": build_acquisition_manifest(raw, args.json_file.name, redact=redact),
-                "triage_result": triage_exported_chatsvc_json(data, redact=redact, salt=run_salt),
+                "triage_result": triage_exported_chatsvc_json(
+                    data,
+                    redact=redact,
+                    salt=run_salt,
+                    schema_mode=args.schema,
+                ),
             }
             print(json.dumps(out, indent=2, ensure_ascii=False))
             return 0
@@ -629,7 +704,7 @@ def main(argv: List[str] | None = None) -> int:
                 safe_msg = "Malformed JSON input (line/column and snippet suppressed in masked mode)"
             else:
                 safe_msg = str(exc)
-                for attr in ("log_file", "json_file", "image_file"):
+                for attr in ("target_path", "log_file", "json_file", "image_file"):
                     cand_path = getattr(args, attr, None)
                     if isinstance(cand_path, Path):
                         safe_msg = safe_msg.replace(str(cand_path), "[REDACTED_PATH]")

@@ -1,7 +1,7 @@
-# `StarShield-Bench-24` (`v1.0.0` · Paired with `starshield-forensics v0.3.5`)
+# `StarShield-Bench-24` (`v1.0.0` · Paired with `starshield-forensics v0.3.6`)
 
 > **24-Case Deterministic Evidentiary Triage & Adversarial Prompt-Injection Benchmark**  
-> **Author:** Ziqi Xiao (`@Ziqi`) · **DOI:** [`10.5281/zenodo.24145805`](https://doi.org/10.5281/zenodo.24145805) · **License:** MIT · **Classification:** `TLP:CLEAR (100% Synthetic)`
+> **Author:** Ziqi Xiao (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) · **License:** MIT · **Classification:** `TLP:CLEAR (100% Synthetic)`
 
 ---
 
