@@ -1,6 +1,7 @@
 # `starshield-forensics` (`v0.3.7` — Clean-Room Deterministic DFIR Toolkit)
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16602/badge)](https://www.bestpractices.dev/projects/16602)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/Ziqi/starshield-forensics/badge)](https://securityscorecards.dev/viewer/?uri=github.com/Ziqi/starshield-forensics)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24145804.svg)](https://doi.org/10.5281/zenodo.24145804)
 [![StarShield Deterministic CI](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml)
 

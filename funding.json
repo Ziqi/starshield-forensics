@@ -1,0 +1,86 @@
+{
+  "$schema": "https://floss.fund/schema/v1.0.0/funding.schema.json",
+  "version": "v1.0.0",
+  "entity": {
+    "type": "individual",
+    "role": "maintainer",
+    "name": "Ziqi Xiao",
+    "email": "2196305+Ziqi@users.noreply.github.com",
+    "description": "Independent digital forensics and security tooling engineer maintaining starshield-forensics, an offline, zero-dependency, deterministic Chromium LevelDB/IndexedDB record carver, structural image container inspector, and financial checksum verification library.",
+    "webpageUrl": {
+      "url": "https://ziqi.github.io/starshield/",
+      "wellKnown": "https://ziqi.github.io/starshield/.well-known/funding-manifest-urls"
+    }
+  },
+  "projects": [
+    {
+      "guid": "starshield-forensics",
+      "name": "starshield-forensics",
+      "description": "Clean-room, offline, zero-dependency Python digital forensics and pre-action evidence triage toolkit (OpenSSF Best Practices Silver #16602, CERN/Zenodo DOI 10.5281/zenodo.24145804). Carves uncompacted Chromium IndexedDB/LevelDB write-ahead logs with masked Castagnoli CRC32C verification, inspects PNG/JPEG ICC containers, validates ISO-7812/ISO-13616/ISO-9362 payment identifiers, and enforces keyed pseudonymization with zero network or LLM attack surface.",
+      "webpageUrl": {
+        "url": "https://ziqi.github.io/starshield/",
+        "wellKnown": "https://ziqi.github.io/starshield/.well-known/funding-manifest-urls"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/Ziqi/starshield-forensics",
+        "wellKnown": "https://github.com/Ziqi/starshield-forensics/blob/main/.well-known/funding-manifest-urls"
+      },
+      "licenses": [
+        "spdx:MIT"
+      ],
+      "tags": [
+        "security",
+        "privacy",
+        "cryptography",
+        "database",
+        "data",
+        "cli",
+        "python"
+      ]
+    }
+  ],
+  "funding": {
+    "channels": [
+      {
+        "guid": "swift-iban-grant-transfer",
+        "type": "bank",
+        "address": "Direct international wire (SWIFT / IBAN / ACH) coordinated upon grant award via maintainer repository security contact.",
+        "description": "Standard non-dilutive open-source grant settlement channel for foundations and institutional sponsors."
+      },
+      {
+        "guid": "project-portal",
+        "type": "other",
+        "address": "https://ziqi.github.io/starshield/",
+        "description": "Official project documentation, signed release verification keys, and institutional sponsorship portal."
+      }
+    ],
+    "plans": [
+      {
+        "guid": "core-maintenance-fuzzing-2027",
+        "status": "active",
+        "name": "Core Binary Parser Maintenance, Differential Fuzzing & Cross-Browser Format Sustainability",
+        "description": "Sustains 12 months of independent open-source maintenance, Chromium/Electron storage format tracking across upstream browser releases, continuous adversarial parser fuzzing, reproducible Ed25519-signed single-file releases, and public regression test corpus curation.",
+        "amount": 25000,
+        "currency": "USD",
+        "frequency": "yearly",
+        "channels": [
+          "swift-iban-grant-transfer",
+          "project-portal"
+        ]
+      },
+      {
+        "guid": "open-community-support",
+        "status": "active",
+        "name": "General Open-Source Sustainability Contribution",
+        "description": "Flexible contribution supporting ongoing issue triage, documentation, and deterministic benchmark maintenance.",
+        "amount": 0,
+        "currency": "USD",
+        "frequency": "one-time",
+        "channels": [
+          "swift-iban-grant-transfer",
+          "project-portal"
+        ]
+      }
+    ]
+  }
+}
