@@ -1,8 +1,12 @@
 # `starshield-forensics` (`v0.3.6` — Clean-Room Alpha Prototype)
 
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16602/badge)](https://www.bestpractices.dev/projects/16602)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24145804.svg)](https://doi.org/10.5281/zenodo.24145804)
+[![StarShield Deterministic CI](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml)
+
 > **Deterministic Chromium IndexedDB / LevelDB `.log` Multi-Schema Record Carver, Zero-PII Precheck Gate, Structural Image Container Inspector & Financial Checksum Validator**
 >
-> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) · **License:** MIT · **Status:** Alpha Research Prototype · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
+> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) · **OpenSSF Best Practices:** [`PASSING (#16602)`](https://www.bestpractices.dev/projects/16602) · **License:** MIT · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
 
 ---
 
