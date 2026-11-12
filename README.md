@@ -1,4 +1,4 @@
-# `starshield-forensics` (`v0.3.6` — Clean-Room Alpha Prototype)
+# `starshield-forensics` (`v0.3.7` — Clean-Room Deterministic DFIR Toolkit)
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16602/badge)](https://www.bestpractices.dev/projects/16602)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24145804.svg)](https://doi.org/10.5281/zenodo.24145804)
@@ -6,7 +6,7 @@
 
 > **Deterministic Chromium IndexedDB / LevelDB `.log` Multi-Schema Record Carver, Zero-PII Precheck Gate, Structural Image Container Inspector & Financial Checksum Validator**
 >
-> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) · **OpenSSF Best Practices:** [`PASSING (#16602)`](https://www.bestpractices.dev/projects/16602) · **License:** MIT · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
+> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) · **OpenSSF Best Practices:** [`#16602`](https://www.bestpractices.dev/projects/16602) · **License:** MIT · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
 
 ---
 
@@ -73,9 +73,27 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -m starshield.cli demo
 
 ---
 
-## Author, Security Reporting & Inquiries
+## Cryptographic Release Verification & Bit-for-Bit Reproducibility (`v0.3.7`)
 
-- **Ziqi Xiao** (`@Ziqi`) — Independent Security Architect & Digital Forensics Researcher
-- **Documentation & Sample Workpaper:** [https://ziqi.github.io/starshield/](https://ziqi.github.io/starshield/)
-- **Issues & Engagement Inquiries:** [GitHub Issues (`@Ziqi/starshield-forensics`)](https://github.com/Ziqi/starshield-forensics/issues)
-- **Vulnerability Disclosure:** Please use [GitHub Private Vulnerability Reporting](https://github.com/Ziqi/starshield-forensics/security/advisories/new) rather than public issues for security findings.
+Every official release (`starshield.pyz`, `.whl`, `.tar.gz`) is accompanied by `SHA256SUMS` and a detached OpenSSH `Ed25519` cryptographic signature (`SHA256SUMS.sig`) generated from an air-gapped maintainer signing key whose public verifier is distributed in [`KEYS.pub`](./KEYS.pub):
+
+```bash
+# 1. Verify detached Ed25519 signature over SHA256SUMS using standard OpenSSH (>=8.2p1):
+ssh-keygen -Y verify -f KEYS.pub -I "2196305+Ziqi@users.noreply.github.com" -n file -s SHA256SUMS.sig < SHA256SUMS
+
+# 2. Verify artifact SHA-256 digests:
+shasum -a 256 -c SHA256SUMS
+
+# 3. Rebuild starshield.pyz from source and verify bit-for-bit SHA-256 reproducibility:
+python3 scripts/build_reproducible.py --verify
+```
+
+---
+
+## Governance, Assurance Case & Security Reporting
+
+- **Security Assurance Case & 12-Month Roadmap:** [`SECURITY_ASSURANCE_CASE.md`](./SECURITY_ASSURANCE_CASE.md)
+- **Vulnerability Response Policy (48h Ack SLA):** [`SECURITY.md`](./SECURITY.md) · [GitHub Private Vulnerability Reporting](https://github.com/Ziqi/starshield-forensics/security/advisories/new)
+- **Governance, Roles & Continuity Policy:** [`GOVERNANCE.md`](./GOVERNANCE.md)
+- **Contribution, DCO 1.1 & Testing Standards:** [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
+- **Author:** **Ziqi Xiao** (`@Ziqi`) — [Documentation & Sample Workpaper](https://ziqi.github.io/starshield/) · [GitHub Issues](https://github.com/Ziqi/starshield-forensics/issues)

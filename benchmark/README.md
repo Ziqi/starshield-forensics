@@ -37,9 +37,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 benchmark_suite.py --output-dir ./artifacts
 
 ---
 
-## 3. Official Zenodo Archival & Academic Citation (`10.5281/zenodo.24145805`)
+## 3. Official Zenodo Archival & Academic Citation (`10.5281/zenodo.24145804`)
 
-`starshield-forensics v0.3.5` and `StarShield-Bench-24 v1.0.0` are permanently archived at CERN / Zenodo:
-- **Permanent DOI:** [`https://doi.org/10.5281/zenodo.24145805`](https://doi.org/10.5281/zenodo.24145805)
-- **Zenodo Record:** [`https://zenodo.org/records/24145805`](https://zenodo.org/records/24145805)
-- **Machine-Readable Citation:** See [`CITATION.cff`](../CITATION.cff) in the repository root.
+`starshield-forensics v0.3.6` and `StarShield-Bench-24 v1.0.0` are permanently archived at CERN / Zenodo:
+- **Concept DOI (Always Latest):** [`https://doi.org/10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804)
+- **Version `v0.3.6` DOI:** [`https://doi.org/10.5281/zenodo.24151431`](https://doi.org/10.5281/zenodo.24151431) ([`Record #24151431`](https://zenodo.org/records/24151431))
+- **Machine-Readable Citation:** See [`CITATION.cff`](https://github.com/Ziqi/starshield-forensics/blob/main/CITATION.cff) in the repository root.

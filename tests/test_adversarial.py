@@ -489,6 +489,56 @@ class TestAdversarialForensics(unittest.TestCase):
             self.assertEqual(rep_nogo["carvable_json_records_count"], 0)
             self.assertEqual(rep_nogo["verified_leveldb_sstables_count"], 1)
 
+    def test_25_cli_subcommands_crypto_agility_and_external_key_file(self) -> None:
+        """Exercise CLI subcommands, HMAC digest agility (sha384/blake2b), and external key file loading."""
+        sample_json = Path(__file__).resolve().parent.parent / "samples" / "synthetic_case_benchmark.json"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            key_path = Path(tmpdir) / "hmac_secret.key"
+            key_path.write_bytes(b"cleanroom-hmac-key-material-32bytes!")
+
+            # Deterministic cross-run HMAC token with sha384 + external key file
+            out1 = io.StringIO()
+            out2 = io.StringIO()
+            with contextlib.redirect_stdout(out1):
+                rc1 = main(["--hmac-digest", "sha384", "--hmac-key-file", str(key_path), "triage-json", str(sample_json)])
+            with contextlib.redirect_stdout(out2):
+                rc2 = main(["--hmac-digest", "sha384", "--hmac-key-file", str(key_path), "triage-json", str(sample_json)])
+            self.assertEqual(rc1, 0)
+            self.assertEqual(rc2, 0)
+            j1 = json.loads(out1.getvalue())["triage_result"]
+            j2 = json.loads(out2.getvalue())["triage_result"]
+            self.assertEqual(j1["corpus_validated_iocs"], j2["corpus_validated_iocs"])
+
+            # blake2b produces distinct tokens from sha384 under same key
+            out_b2 = io.StringIO()
+            with contextlib.redirect_stdout(out_b2):
+                rc_b2 = main(["--hmac-digest", "blake2b", "--hmac-key-file", str(key_path), "triage-json", str(sample_json)])
+            self.assertEqual(rc_b2, 0)
+            jb2 = json.loads(out_b2.getvalue())["triage_result"]
+            self.assertNotEqual(j1["corpus_validated_iocs"], jb2["corpus_validated_iocs"])
+
+            # Too-short key file rejected cleanly with exit code 2
+            short_key = Path(tmpdir) / "short.key"
+            short_key.write_bytes(b"short")
+            err_buf = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err_buf):
+                rc_short = main(["--hmac-key-file", str(short_key), "triage-json", str(sample_json)])
+            self.assertEqual(rc_short, 2)
+
+            # Exercise corroborate-timestamps, summarize-linguistics, and inspect-image CLI entrypoints
+            for subcmd in ("corroborate-timestamps", "summarize-linguistics"):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(main([subcmd, str(sample_json)]), 0)
+                self.assertIn("acquisition_manifest", json.loads(buf.getvalue()))
+
+            png_file = Path(tmpdir) / "sample.png"
+            png_file.write_bytes(build_valid_png_with_iccp("Display P3", "APPL"))
+            img_buf = io.StringIO()
+            with contextlib.redirect_stdout(img_buf):
+                self.assertEqual(main(["inspect-image", str(png_file)]), 0)
+            self.assertTrue(json.loads(img_buf.getvalue())["image_container_analysis"]["valid_container"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,12 +18,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install modern build tooling
-        run: python -m pip install --upgrade pip "setuptools>=77" wheel
-      - name: Run positive, adversarial & malformed-input unit tests
-        run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m unittest discover -s tests -v
+      - name: Install build, coverage, lint & static security tools
+        run: python -m pip install --upgrade pip "setuptools>=77" wheel coverage ruff bandit
+      - name: Enforce coding standards (Ruff) & static vulnerability scan (Bandit)
+        run: |
+          ruff check starshield tests benchmark scripts
+          bandit -q -r starshield scripts
+      - name: Run unit & adversarial tests under strict warnings + >=80% statement coverage gate
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error -m coverage run -m unittest discover -s tests -v
+          python -m coverage report --include="starshield/*" --fail-under=80
       - name: Run StarShield-Bench-24 deterministic benchmark
-        run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python benchmark/benchmark_suite.py
+        run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error benchmark/benchmark_suite.py
+      - name: Verify bit-for-bit reproducible zipapp build
+        run: |
+          python scripts/build_reproducible.py --verify --output dist/starshield.pyz
+          python dist/starshield.pyz demo > /tmp/pyz_demo.json
+          python -c "import json; d=json.load(open('/tmp/pyz_demo.json')); assert d['engine_1_raw_leveldb_wal_carver']['corrupted_frames_count'] == 0"
       - name: Build wheel and verify installed CLI entrypoint outside repo tree
         run: |
           python -m pip wheel . --no-deps -w dist/

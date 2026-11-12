@@ -38,11 +38,14 @@ from starshield.image_containers import (
     inspect_image_container,
 )
 from starshield.ioc_validators import (
+    SUPPORTED_HMAC_DIGESTS,
     empty_ioc_dict,
     extract_validated_iocs,
+    get_active_hmac_callable,
     luhn_valid,
     mask_identifier,
     merge_ioc_dicts,
+    set_active_hmac_digest,
 )
 from starshield.leveldb_log import (
     VALID_SCHEMA_MODES,
@@ -72,10 +75,10 @@ def redact_timestamp(ts: Any) -> Any:
 
 
 def redact_msg_id(msg_id: str, salt: bytes) -> str:
-    """Keyed per-run HMAC-SHA256 message token (resists low-entropy rainbow reversal)."""
+    """Keyed per-run HMAC message token with configurable digest agility."""
     if not msg_id:
         return ""
-    digest = hmac.new(salt, msg_id.encode("utf-8"), hashlib.sha256).hexdigest()[:12]
+    digest = hmac.new(salt, msg_id.encode("utf-8"), get_active_hmac_callable()).hexdigest()[:12]
     return f"msg_hmac_{digest}"
 
 
@@ -573,6 +576,18 @@ def main(argv: List[str] | None = None) -> int:
         default=MAX_DEFAULT_MB,
         help=f"Maximum input file size in MiB (default: {MAX_DEFAULT_MB})",
     )
+    parser.add_argument(
+        "--hmac-digest",
+        choices=tuple(SUPPORTED_HMAC_DIGESTS.keys()),
+        default="sha256",
+        help="HMAC digest algorithm for keyed pseudonymization agility (default: sha256)",
+    )
+    parser.add_argument(
+        "--hmac-key-file",
+        type=Path,
+        default=None,
+        help="Optional external secret key file (>=16 bytes) for cross-run pseudonymization without hardcoded keys",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("demo", help="Run deterministic triage pipeline on clean-room specification test vectors")
@@ -618,9 +633,16 @@ def main(argv: List[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     redact = not args.unredacted
-    run_salt = secrets.token_bytes(32)
+    set_active_hmac_digest(args.hmac_digest)
 
     try:
+        if args.hmac_key_file is not None:
+            raw_key = read_bounded_bytes(args.hmac_key_file, max_mb=1, redact=redact).strip()
+            if len(raw_key) < 16:
+                raise ValueError("External --hmac-key-file must contain at least 16 secret bytes")
+            run_salt = raw_key
+        else:
+            run_salt = secrets.token_bytes(32)
         if args.command == "demo":
             return run_demo(redact=redact)
 

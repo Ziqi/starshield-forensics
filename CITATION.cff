@@ -7,7 +7,7 @@ authors:
     given-names: "Ziqi"
 repository-code: "https://github.com/Ziqi/starshield-forensics"
 url: "https://ziqi.github.io/starshield/"
-version: "0.3.6"
+version: "0.3.7"
 doi: "10.5281/zenodo.24145804"
 date-released: "2026-11-12"
 license: "MIT"

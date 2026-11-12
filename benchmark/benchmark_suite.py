@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-StarShield-Bench-24 (`v1.0.0` paired with `starshield-forensics v0.3.5`)
+StarShield-Bench-24 (`v1.0.0` paired with `starshield-forensics v0.3.6`)
 Author: Ziqi Xiao (@Ziqi)
 License: MIT
 

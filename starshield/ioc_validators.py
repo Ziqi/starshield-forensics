@@ -126,12 +126,32 @@ def iban_mod97_valid(iban: str) -> bool:
     return int(numeric_str) % 97 == 1
 
 
-def mask_identifier(val: str, salt: bytes | None = None) -> str:
-    """Keyed HMAC-SHA256 redaction without leaking prefix/suffix characters."""
+SUPPORTED_HMAC_DIGESTS = {
+    "sha256": hashlib.sha256,
+    "sha384": hashlib.sha384,
+    "blake2b": hashlib.blake2b,
+}
+_ACTIVE_HMAC_DIGEST = "sha256"
+
+
+def set_active_hmac_digest(alg: str) -> None:
+    global _ACTIVE_HMAC_DIGEST
+    if alg not in SUPPORTED_HMAC_DIGESTS:
+        raise ValueError(f"Unsupported HMAC digest algorithm: {alg}")
+    _ACTIVE_HMAC_DIGEST = alg
+
+
+def get_active_hmac_callable():
+    return SUPPORTED_HMAC_DIGESTS[_ACTIVE_HMAC_DIGEST]
+
+
+def mask_identifier(val: str, salt: bytes | None = None, digest_alg: str | None = None) -> str:
+    """Keyed HMAC redaction with cryptographic algorithm agility (resists dictionary confirmation)."""
     if not val:
         return ""
     key = salt if salt is not None else DEFAULT_EPHEMERAL_SALT
-    digest = hmac.new(key, val.encode("utf-8"), hashlib.sha256).hexdigest()[:12]
+    fn = SUPPORTED_HMAC_DIGESTS[digest_alg] if digest_alg else get_active_hmac_callable()
+    digest = hmac.new(key, val.encode("utf-8"), fn).hexdigest()[:12]
     return f"[REDACTED_HMAC:{digest}]"
 
 
