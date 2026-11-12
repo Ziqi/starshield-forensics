@@ -5,7 +5,7 @@
     "type": "individual",
     "role": "maintainer",
     "name": "Ziqi Xiao",
-    "email": "2196305+Ziqi@users.noreply.github.com",
+    "email": "sinoziqi@proton.me",
     "description": "Independent digital forensics and security tooling engineer maintaining starshield-forensics, an offline, zero-dependency, deterministic Chromium LevelDB/IndexedDB record carver, structural image container inspector, and financial checksum verification library.",
     "webpageUrl": {
       "url": "https://ziqi.github.io/starshield/",
