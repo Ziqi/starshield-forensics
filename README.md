@@ -6,7 +6,7 @@
 
 > **Deterministic Chromium IndexedDB / LevelDB `.log` Multi-Schema Record Carver, Zero-PII Precheck Gate, Structural Image Container Inspector & Financial Checksum Validator**
 >
-> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) · **OpenSSF Best Practices:** [`#16602`](https://www.bestpractices.dev/projects/16602) · **License:** MIT · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
+> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) · **OpenSSF Best Practices:** [`#16602 (SILVER)`](https://www.bestpractices.dev/projects/16602) · **License:** MIT · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
 
 ---
 
@@ -18,7 +18,7 @@ All bundled fixtures in `samples/` and `starshield/data/`—plus the seeded 24-c
 
 ---
 
-## Epistemic Tiers & Capability Boundary Matrix (`v0.3.6`)
+## Epistemic Tiers & Capability Boundary Matrix (`v0.3.7`)
 
 Every analytical output carries an explicit machine-readable epistemic tier so investigators and solicitors never conflate raw bytes with interpretive leads:
 
@@ -27,7 +27,7 @@ Every analytical output carries an explicit machine-readable epistemic tier so i
 - **`INFERRED`**: Contextual triage lead requiring external corroboration (e.g., server-side bank logs or subpoenaed ISP records); never asserted as standalone proof.
 - **`UNKNOWN`**: Explicitly outside the evidentiary boundary of local client artifacts (e.g., records compacted prior to acquisition).
 
-| Module | Capability in `v0.3.6` | Epistemic Boundary & Known Limitations |
+| Module | Capability in `v0.3.7` | Epistemic Boundary & Known Limitations |
 | :--- | :--- | :--- |
 | **Zero-PII Storage Feasibility Gate** (`precheck`) | Scans Chromium IndexedDB / Local Storage folders or `.log`/`.ldb` files offline, checks LevelDB SSTable footer magic (`0xdb4775248b80fb57`), `.blob` directories, and Blink `0xFF` headers, emitting a deterministic `GO` / `PARTIAL` / `NO_GO_COMPACTED_OR_UNSUPPORTED` manifest with zero plaintext leakage. | *Pre-screens compaction status prior to triage; does not decompress `.ldb` blocks.* |
 | **Chromium LevelDB `.log` Multi-Schema Carver** (`leveldb_log.py`) | Parses 32 KiB physical blocks, verifies masked Castagnoli CRC32C (`0xA282EAD8`), reassembles cross-block `FULL`/`FIRST`/`MIDDLE`/`LAST` WriteBatch frames, and extracts UTF-8 & Blink UTF-16LE JSON records across `chatsvc` (Teams/Skype), Slack Web, WhatsApp/Web Messenger, and B2B invoice portals (`--schema auto\|chatsvc\|generic-json`). | *Does not decompress Snappy `.ldb` SSTables or decode non-JSON Blink `StructuredClone` primitives (roadmap: `v0.4`).* |
@@ -45,7 +45,7 @@ Every analytical output carries an explicit machine-readable epistemic tier so i
 python3 starshield.pyz demo
 python3 starshield.pyz precheck /path/to/readonly_chromium_idb_copy
 
-# Option B — Clone & run all 24 unit tests + StarShield-Bench-24 (<0.2s, zero dependencies):
+# Option B — Clone & run all 25 unit tests + StarShield-Bench-24 (<0.2s, zero dependencies):
 git clone https://github.com/Ziqi/starshield-forensics.git
 cd starshield-forensics
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -m unittest discover -s tests -v
