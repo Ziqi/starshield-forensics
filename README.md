@@ -7,7 +7,7 @@
 
 > **Deterministic Chromium IndexedDB / LevelDB `.log` Multi-Schema Record Carver, Zero-PII Precheck Gate, Structural Image Container Inspector & Financial Checksum Validator**
 >
-> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) · **OpenSSF Best Practices:** [`#16602 (SILVER)`](https://www.bestpractices.dev/projects/16602) · **License:** MIT · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
+> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (`v0.3.7`: [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)) · **OpenSSF Best Practices:** [`#16602 (SILVER — 226%)`](https://www.bestpractices.dev/projects/16602) · **License:** MIT · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
 
 ---
 
@@ -35,7 +35,7 @@ Every analytical output carries an explicit machine-readable epistemic tier so i
 | **Exported Message & Portal JSON Triage** (`triage-json`) | Enumerates soft-deleted (`deletetime` / `deleted_ts` / `is_deleted`) and edited (`edittime` / `edited.ts`) JSON records across messaging & portal exports, extracting validated IOCs strictly per record. | *Cannot quantify records already compacted or evicted prior to acquisition.* |
 | **Financial Checksum Validation** (`ioc_validators.py`) | Validates payment cards via ISO/IEC 7812 **Luhn**, IBANs via all 89 SWIFT IBAN Registry country lengths (15–34 chars) + **Mod-97**, SWIFT/BICs via all **249 ISO 3166-1 alpha-2 country codes + `XK`** (`250` total codes) + stopword filtering, and pairs UK Sort Codes within a 120-char intra-message window. | *Does not bundle proprietary Pay.UK Vocalink sort-code modulus weight tables.* |
 | **RFC 2083 PNG & ISO 10918 JPEG Container Inspection** (`image_containers.py`) | Enforces PNG `IHDR` + `IDAT` + `IEND` completeness and per-chunk CRC32, bounded-decompresses `iCCP` chunks (`acsp`), and reassembles multi-chunk JPEG `APP2` `ICC_PROFILE` + `APP13` (`8BIM`) segments through `SOS`/`EOI` (`0xFFD9`). | *Emits neutral container observations + benign screenshot/OS-resave caveats; never declares standalone "proof of forgery".* |
-| **Keyed Pseudonymization & Masked Output Model** (`cli.py`) | Default masked mode applies ephemeral per-run `HMAC-SHA256` tokens (zero prefix/suffix character leakage) and suppresses raw file `SHA-256` hashes, exact byte lengths, source filenames, PNG `tEXt/iTXt` previews, custom ICC names, exact UTC dates, and failure-path `stderr` filenames/byte counts/snippets. | *Provides keyed pseudonymization for casual screen/log hygiene—NOT formal legal anonymization under UK GDPR / GDPR. Pass `--unredacted` only inside authorized offline environments.* |
+| **Keyed Pseudonymization & Cryptographic Agility** (`cli.py`) | Default masked mode applies ephemeral per-run `HMAC-SHA256` tokens (configurable via `--hmac-digest {sha256,sha384,blake2b}` and external 32-byte salt `--hmac-key-file PATH`) and suppresses raw file `SHA-256` hashes, exact byte lengths, source filenames, PNG `tEXt/iTXt` previews, custom ICC names, exact UTC dates, and failure-path `stderr` filenames/byte counts/snippets. | *Provides keyed pseudonymization for casual screen/log hygiene—NOT formal legal anonymization under UK GDPR / GDPR. Pass `--unredacted` only inside authorized offline environments.* |
 
 ---
 
@@ -54,7 +54,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 benchmark/benchmark_suite.py
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -m starshield.cli demo
 ```
 
-### CLI Subcommands (`starshield [--unredacted] [--max-mb 64] <subcommand>`)
+### CLI Subcommands (`starshield [--unredacted] [--max-mb 64] [--hmac-digest {sha256,sha384,blake2b}] [--hmac-key-file PATH] <subcommand>`)
 
 | Subcommand | Input Artifact | Output JSON Summary |
 | :--- | :--- | :--- |
