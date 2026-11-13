@@ -1,7 +1,8 @@
 # `starshield-forensics` (`v0.3.7` — Clean-Room Deterministic DFIR Toolkit)
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16602/badge)](https://www.bestpractices.dev/projects/16602)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/Ziqi/starshield-forensics/badge)](https://securityscorecards.dev/viewer/?uri=github.com/Ziqi/starshield-forensics)
+[![OpenSSF Scorecard](https://img.shields.io/endpoint?url=https%3A%2F%2Fziqi.github.io%2Fstarshield%2Fscorecard.json)](https://github.com/Ziqi/starshield-forensics/actions/workflows/scorecard.yml)
+[![PyPI](https://img.shields.io/pypi/v/starshield-forensics?label=PyPI%20%28PEP%20740%29&color=blue)](https://pypi.org/project/starshield-forensics/0.3.7/)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
 [![Supply-Chain Attestations](https://github.com/Ziqi/starshield-forensics/actions/workflows/attestations.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
 [![REUSE status](https://img.shields.io/badge/REUSE-3.3%20compliant-brightgreen)](./REUSE.toml)
@@ -11,7 +12,7 @@
 
 > **Deterministic Chromium IndexedDB / LevelDB `.log` Multi-Schema Record Carver, Zero-PII Precheck Gate, Structural Image Container Inspector & Financial Checksum Validator**
 >
-> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (`v0.3.7`: [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)) · **OpenSSF Best Practices:** [`#16602 (SILVER — 226%)`](https://www.bestpractices.dev/projects/16602) · **Scorecard:** [`7.1/10`](https://securityscorecards.dev/viewer/?uri=github.com/Ziqi/starshield-forensics) · **Provenance:** [SLSA L3 & Sigstore `/attestations`](https://github.com/Ziqi/starshield-forensics/attestations) · **Method Validation:** [FSR-C-107 / ISO 17025 Dual-Tool Summary](./VALIDATION_REPORT_FSR_ISO17025.md) · **License:** MIT (`REUSE 3.3`) · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
+> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **PyPI:** [`starshield-forensics 0.3.7 (PEP 740)`](https://pypi.org/project/starshield-forensics/0.3.7/) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (`v0.3.7`: [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)) · **OpenSSF Best Practices:** [`#16602 (SILVER — 226%)`](https://www.bestpractices.dev/projects/16602) · **Scorecard:** [`7.2/10`](https://github.com/Ziqi/starshield-forensics/actions/workflows/scorecard.yml) · **Provenance:** [SLSA L3 & Sigstore `/attestations`](https://github.com/Ziqi/starshield-forensics/attestations) · **Method Validation:** [FSR-C-107 / ISO 17025 Dual-Tool Summary](./VALIDATION_REPORT_FSR_ISO17025.md) · **License:** MIT (`REUSE 3.3`) · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
 
 ---
 
@@ -43,14 +44,18 @@ Every analytical output carries an explicit machine-readable epistemic tier so i
 
 ---
 
-## Installation, Zero-Install `.pyz` & `StarShield-Bench-24` Quickstart
+## Installation (`pip` PEP 740 / Zero-Install `.pyz`) & `StarShield-Bench-24` Quickstart
 
 ```bash
-# Option A — Zero-install single-file zipapp (for air-gapped forensic VMs & law-firm IT):
+# Option A — Official PyPI package (with PEP 740 Sigstore digital attestations, zero dependencies):
+pip install starshield-forensics
+starshield demo
+
+# Option B — Zero-install single-file zipapp (for air-gapped forensic VMs & law-firm IT):
 python3 starshield.pyz demo
 python3 starshield.pyz precheck /path/to/readonly_chromium_idb_copy
 
-# Option B — Clone & run all 25 unit tests + StarShield-Bench-24 (<0.2s, zero dependencies):
+# Option C — Clone & run all 25 unit tests + StarShield-Bench-24 (<0.2s, zero dependencies):
 git clone https://github.com/Ziqi/starshield-forensics.git
 cd starshield-forensics
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -m unittest discover -s tests -v
