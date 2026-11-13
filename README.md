@@ -2,12 +2,15 @@
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16602/badge)](https://www.bestpractices.dev/projects/16602)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/Ziqi/starshield-forensics/badge)](https://securityscorecards.dev/viewer/?uri=github.com/Ziqi/starshield-forensics)
+[![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
+[![Supply-Chain Attestations](https://github.com/Ziqi/starshield-forensics/actions/workflows/attestations.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
+[![REUSE status](https://img.shields.io/badge/REUSE-3.3%20compliant-brightgreen)](./REUSE.toml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24145804.svg)](https://doi.org/10.5281/zenodo.24145804)
 [![StarShield Deterministic CI](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml)
 
 > **Deterministic Chromium IndexedDB / LevelDB `.log` Multi-Schema Record Carver, Zero-PII Precheck Gate, Structural Image Container Inspector & Financial Checksum Validator**
 >
-> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (`v0.3.7`: [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)) · **OpenSSF Best Practices:** [`#16602 (SILVER — 226%)`](https://www.bestpractices.dev/projects/16602) · **License:** MIT · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
+> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (`v0.3.7`: [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)) · **OpenSSF Best Practices:** [`#16602 (SILVER — 226%)`](https://www.bestpractices.dev/projects/16602) · **Scorecard:** [`7.1/10`](https://securityscorecards.dev/viewer/?uri=github.com/Ziqi/starshield-forensics) · **Provenance:** [SLSA L3 & Sigstore `/attestations`](https://github.com/Ziqi/starshield-forensics/attestations) · **License:** MIT (`REUSE 3.3`) · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
 
 ---
 
@@ -76,23 +79,34 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -m starshield.cli demo
 
 ## Cryptographic Release Verification & Bit-for-Bit Reproducibility (`v0.3.7`)
 
-Every official release (`starshield.pyz`, `.whl`, `.tar.gz`) is accompanied by `SHA256SUMS` and a detached OpenSSH `Ed25519` cryptographic signature (`SHA256SUMS.sig`) generated from an air-gapped maintainer signing key whose public verifier is distributed in [`KEYS.pub`](./KEYS.pub):
+Every official release (`starshield.pyz`, `.whl`, `.tar.gz`, and ISO/IEC 5962:2021 SPDX 2.3 SBOM `starshield-forensics-0.3.7.spdx.json`) is backed by **triple cryptographic verification**:
+1. **GitHub OIDC + Sigstore (`Fulcio` X.509 + `Rekor` transparency log)** build provenance & SPDX 2.3 SBOM attestations at [`/attestations`](https://github.com/Ziqi/starshield-forensics/attestations);
+2. **Isolated SLSA Build Level 3** provenance (`multiple.intoto.jsonl` via `slsa-framework/slsa-github-generator`);
+3. **Air-gapped OpenSSH `Ed25519`** detached maintainer signature (`SHA256SUMS.sig`) verified against [`KEYS.pub`](./KEYS.pub).
 
 ```bash
-# 1. Verify detached Ed25519 signature over SHA256SUMS using standard OpenSSH (>=8.2p1):
-ssh-keygen -Y verify -f KEYS.pub -I "2196305+Ziqi@users.noreply.github.com" -n file -s SHA256SUMS.sig < SHA256SUMS
+# 1. Verify Sigstore X.509 + Rekor build & SBOM attestations via GitHub CLI:
+gh attestation verify starshield.pyz -R Ziqi/starshield-forensics
 
-# 2. Verify artifact SHA-256 digests:
+# 2. Verify isolated SLSA Build Level 3 provenance (.intoto.jsonl):
+slsa-verifier verify-artifact starshield.pyz \
+  --provenance-path multiple.intoto.jsonl \
+  --source-uri github.com/Ziqi/starshield-forensics
+
+# 3. Offline air-gapped verification using standard OpenSSH (>=8.2p1) & SHA256SUMS:
+ssh-keygen -Y verify -f KEYS.pub -I "2196305+Ziqi@users.noreply.github.com" -n file -s SHA256SUMS.sig < SHA256SUMS
 shasum -a 256 -c SHA256SUMS
 
-# 3. Rebuild starshield.pyz from source and verify bit-for-bit SHA-256 reproducibility:
+# 4. Rebuild starshield.pyz & SPDX 2.3 SBOM from source and verify bit-for-bit reproducibility:
 python3 scripts/build_reproducible.py --verify
+python3 scripts/generate_spdx_sbom.py --verify
 ```
 
 ---
 
 ## Governance, Assurance Case & Security Reporting
 
+- **OpenSSF Security Insights (v2.0.0 / OSPS Baseline) & REUSE 3.3:** [`SECURITY-INSIGHTS.yml`](./SECURITY-INSIGHTS.yml) · [`REUSE.toml`](./REUSE.toml)
 - **Security Assurance Case & 12-Month Roadmap:** [`SECURITY_ASSURANCE_CASE.md`](./SECURITY_ASSURANCE_CASE.md)
 - **Vulnerability Response Policy (48h Ack SLA):** [`SECURITY.md`](./SECURITY.md) · [GitHub Private Vulnerability Reporting](https://github.com/Ziqi/starshield-forensics/security/advisories/new)
 - **Governance, Roles & Continuity Policy:** [`GOVERNANCE.md`](./GOVERNANCE.md)

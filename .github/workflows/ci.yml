@@ -11,6 +11,26 @@ permissions:
   contents: read
 
 jobs:
+  supply-chain-compliance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: FSFE REUSE 3.2/3.3 Licensing & Copyright Compliance
+        uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5 # v6.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Validate OpenSSF SECURITY-INSIGHTS.yml & SPDX 2.3 SBOM Determinism
+        run: |
+          python -m pip install --upgrade pip pyyaml
+          python -c "import yaml; d=yaml.safe_load(open('SECURITY-INSIGHTS.yml')); assert d['header']['schema-version']=='2.0.0' and d['repository']['no-third-party-packages'] is True"
+          python scripts/build_reproducible.py --verify --output /tmp/starshield.pyz
+          python scripts/generate_spdx_sbom.py --verify --verify-pyz /tmp/starshield.pyz --output /tmp/starshield-forensics-0.3.7.spdx.json
+
   test-and-package:
     runs-on: ubuntu-latest
     permissions:

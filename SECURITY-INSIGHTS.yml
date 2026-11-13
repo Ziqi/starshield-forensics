@@ -1,0 +1,155 @@
+header:
+  schema-version: '2.0.0'
+  last-updated: '2026-11-13'
+  last-reviewed: '2026-11-13'
+  url: https://github.com/Ziqi/starshield-forensics/blob/main/SECURITY-INSIGHTS.yml
+  comment: >
+    Machine-readable OpenSSF Security Insights (v2.0.0) and OSPS baseline
+    manifest for starshield-forensics.
+
+project:
+  name: starshield-forensics
+  homepage: https://ziqi.github.io/starshield/
+  roadmap: https://github.com/Ziqi/starshield-forensics/blob/main/SECURITY_ASSURANCE_CASE.md
+  funding: https://ziqi.github.io/starshield/funding.json
+  administrators:
+    - name: Ziqi Xiao
+      affiliation: Independent Security Architect & Digital Forensics Researcher
+      email: 2196305+Ziqi@users.noreply.github.com
+      social: https://github.com/Ziqi
+      primary: true
+  repositories:
+    - name: starshield-forensics
+      url: https://github.com/Ziqi/starshield-forensics
+      comment: >
+        Core deterministic Chromium IndexedDB/LevelDB .log carver, PNG/JPEG ICC
+        container provenance inspector, ISO-13616/Luhn checksum validator, and
+        StarShield-Bench-24 suite.
+    - name: starshield
+      url: https://github.com/Ziqi/starshield
+      comment: >
+        Zero-telemetry static documentation portal and synthetic triage
+        workpaper hosted via GitHub Pages.
+  vulnerability-reporting:
+    reports-accepted: true
+    bug-bounty-available: false
+    contact:
+      name: Ziqi Xiao
+      email: 2196305+Ziqi@users.noreply.github.com
+      primary: true
+    security-policy: https://github.com/Ziqi/starshield-forensics/blob/main/SECURITY.md
+    in-scope:
+      - parser memory exhaustion or decompression-bomb bounds bypass
+      - Castagnoli CRC32C or LevelDB WriteBatch framing validation bypass
+      - default keyed HMAC pseudonymization or failure-path stderr leakage
+      - build reproducibility or cryptographic release attestation flaw
+    out-of-scope:
+      - local resource exhaustion requiring explicit --max-mb override
+      - social engineering
+    comment: >
+      Report security vulnerabilities privately via GitHub Private Vulnerability
+      Reporting (https://github.com/Ziqi/starshield-forensics/security/advisories/new)
+      with a 48-hour acknowledgment SLA.
+  documentation:
+    quickstart-guide: https://github.com/Ziqi/starshield-forensics#installation-zero-install-pyz--starshield-bench-24-quickstart
+    detailed-guide: https://ziqi.github.io/starshield/
+    code-of-conduct: https://github.com/Ziqi/starshield-forensics/blob/main/CODE_OF_CONDUCT.md
+    release-process: https://github.com/Ziqi/starshield-forensics/blob/main/SECURITY_ASSURANCE_CASE.md
+    signature-verification: https://github.com/Ziqi/starshield-forensics#cryptographic-release-verification--bit-for-bit-reproducibility-v037
+
+repository:
+  url: https://github.com/Ziqi/starshield-forensics
+  status: active
+  bug-fixes-only: false
+  accepts-change-request: true
+  accepts-automated-change-request: true
+  no-third-party-packages: true
+  core-team:
+    - name: Ziqi Xiao
+      affiliation: Independent Security Architect & Digital Forensics Researcher
+      email: 2196305+Ziqi@users.noreply.github.com
+      social: https://github.com/Ziqi
+      primary: true
+  documentation:
+    contributing-guide: https://github.com/Ziqi/starshield-forensics/blob/main/CONTRIBUTING.md
+    dependency-management-policy: https://github.com/Ziqi/starshield-forensics/blob/main/SECURITY_ASSURANCE_CASE.md
+    governance: https://github.com/Ziqi/starshield-forensics/blob/main/GOVERNANCE.md
+    review-policy: https://github.com/Ziqi/starshield-forensics/blob/main/CONTRIBUTING.md
+    security-policy: https://github.com/Ziqi/starshield-forensics/blob/main/SECURITY.md
+  license:
+    url: https://github.com/Ziqi/starshield-forensics/blob/main/LICENSE
+    expression: MIT
+  release:
+    automated-pipeline: true
+    changelog: https://github.com/Ziqi/starshield-forensics/releases
+    license:
+      url: https://github.com/Ziqi/starshield-forensics/blob/main/LICENSE
+      expression: MIT
+    distribution-points:
+      - uri: https://github.com/Ziqi/starshield-forensics/releases/tag/v0.3.7
+        comment: Official GitHub Release v0.3.7 with signed zipapp, wheel, sdist, SPDX 2.3 SBOM, and SLSA L3 provenance.
+      - uri: pkg:pypi/starshield-forensics@0.3.7
+        comment: Python package identifier (stdlib-only runtime).
+      - uri: https://doi.org/10.5281/zenodo.24156262
+        comment: Permanent CERN Zenodo archival record for v0.3.7 (Concept DOI 10.5281/zenodo.24145804).
+    attestations:
+      - name: GitHub OIDC Sigstore Build Provenance & SBOM Attestations
+        predicate-uri: https://slsa.dev/provenance/v1
+        location: https://github.com/Ziqi/starshield-forensics/attestations
+        comment: Sigstore Fulcio X.509 and Rekor transparency log attestations verifiable via gh attestation verify.
+      - name: SLSA Build Level 3 Isolated Provenance
+        predicate-uri: https://slsa.dev/provenance/v0.2
+        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.3.7/multiple.intoto.jsonl
+        comment: Non-forgeable SLSA v1.0 Level 3 provenance generated via slsa-framework/slsa-github-generator.
+      - name: Release SPDX 2.3 SBOM
+        predicate-uri: https://spdx.dev/Document/v2.3
+        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.3.7/starshield-forensics-0.3.7.spdx.json
+        comment: Deterministic ISO/IEC 5962:2021 SPDX 2.3 JSON Software Bill of Materials.
+  security:
+    assessments:
+      self:
+        name: NIST IR 7608 Structured Security Assurance Case
+        evidence: https://github.com/Ziqi/starshield-forensics/blob/main/SECURITY_ASSURANCE_CASE.md
+        date: '2026-11-12'
+        comment: Claims-Arguments-Evidence assurance case covering threat model, parser bounds, and reproducibility.
+      third-party:
+        - name: Linux Foundation OpenSSF Best Practices Silver (#16602, 226%)
+          evidence: https://www.bestpractices.dev/projects/16602
+          date: '2026-11-12'
+          comment: Certified OpenSSF Best Practices Silver badge with 226% tiered completion.
+        - name: OpenSSF Security Scorecard
+          evidence: https://securityscorecards.dev/viewer/?uri=github.com/Ziqi/starshield-forensics
+          date: '2026-11-12'
+          comment: Continuous supply-chain security audit published via OIDC workflow.
+    champions:
+      - name: Ziqi Xiao
+        email: 2196305+Ziqi@users.noreply.github.com
+        primary: true
+    tools:
+      - name: CodeQL
+        type: SAST
+        rulesets:
+          - security-and-quality
+        integration:
+          adhoc: false
+          ci: true
+          release: true
+        results: {}
+      - name: Bandit
+        type: SAST
+        rulesets:
+          - default
+        integration:
+          adhoc: true
+          ci: true
+          release: true
+        results: {}
+      - name: Dependabot
+        type: SCA
+        rulesets:
+          - github-actions
+        integration:
+          adhoc: false
+          ci: true
+          release: false
+        results: {}
