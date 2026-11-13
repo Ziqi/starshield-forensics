@@ -1,15 +1,21 @@
-name: Publish to Official PyPI (OIDC Trusted Publisher)
+name: Publish to Official PyPI (OIDC Trusted Publisher + PEP 740 Attestations)
 
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Signed GitHub Release tag whose canonical wheel/sdist will be published"
+        required: false
+        default: "v0.3.7"
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  build-and-publish:
+  verify-and-publish:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -21,34 +27,56 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Install build tooling
-        run: python -m pip install --upgrade pip build "setuptools>=77" wheel
-      - name: Run full adversarial unit test suite & StarShield-Bench-24 gate
+      - name: Run unit, benchmark & UK FSR / ISO 17025 cross-validation gates
         run: |
-          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m unittest discover -s tests -v
-          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python benchmark/benchmark_suite.py
-      - name: Build wheel and POSIX-sanitized sdist
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error -m unittest discover -s tests -v
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error benchmark/benchmark_suite.py
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error scripts/verify_cross_tool_forensics.py
+      - name: Fetch & cryptographically verify canonical signed release distributions
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || 'v0.3.7' }}
         run: |
-          python -m build --outdir dist/
-          python - <<'PY'
-          import gzip, io, pathlib, tarfile
-          for sdist in pathlib.Path("dist").glob("*.tar.gz"):
-              src_bytes = sdist.read_bytes()
-              buf = io.BytesIO()
-              with tarfile.open(fileobj=io.BytesIO(src_bytes), mode="r:gz") as tin:
-                  with gzip.GzipFile(filename="", mode="wb", fileobj=buf, mtime=1762819200) as gz:
-                      with tarfile.open(fileobj=gz, mode="w") as tout:
-                          for m in tin.getmembers():
-                              f = tin.extractfile(m) if m.isfile() else None
-                              m.uid = 0
-                              m.gid = 0
-                              m.uname = "root"
-                              m.gname = "root"
-                              m.mtime = 1762819200
-                              tout.addfile(m, f)
-              sdist.write_bytes(buf.getvalue())
-          PY
-      - name: Publish distributions to PyPI via OIDC Trusted Publishing
+          set -euo pipefail
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag format: ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          VER="${RELEASE_TAG#v}"
+          BASE_URL="https://github.com/Ziqi/starshield-forensics/releases/download/${RELEASE_TAG}"
+          WHL_NAME="starshield_forensics-${VER}-py3-none-any.whl"
+          SDIST_NAME="starshield_forensics-${VER}.tar.gz"
+
+          mkdir -p /tmp/release-verify dist
+          curl -fsSL "${BASE_URL}/SHA256SUMS" -o /tmp/release-verify/SHA256SUMS
+          curl -fsSL "${BASE_URL}/SHA256SUMS.sig" -o /tmp/release-verify/SHA256SUMS.sig
+          curl -fsSL "${BASE_URL}/${WHL_NAME}" -o "/tmp/release-verify/${WHL_NAME}"
+          curl -fsSL "${BASE_URL}/${SDIST_NAME}" -o "/tmp/release-verify/${SDIST_NAME}"
+
+          ssh-keygen -Y verify \
+            -f KEYS.pub \
+            -I "2196305+Ziqi@users.noreply.github.com" \
+            -n file \
+            -s /tmp/release-verify/SHA256SUMS.sig < /tmp/release-verify/SHA256SUMS
+
+          (
+            cd /tmp/release-verify
+            grep -E "  (${WHL_NAME}|${SDIST_NAME})$" SHA256SUMS | sha256sum -c -
+          )
+
+          if [[ "${RELEASE_TAG}" == "v0.3.7" ]]; then
+            sha256sum -c - <<'EOF'
+          4ffe6454c4ec78d3485326a4ac763ce1abaa1205009b057d07f69ad99dc37730  /tmp/release-verify/starshield_forensics-0.3.7-py3-none-any.whl
+          2dd56e823d46fd41d570ee6281d98db120ad64e64b55950827ef57c186e40edd  /tmp/release-verify/starshield_forensics-0.3.7.tar.gz
+          EOF
+          fi
+
+          cp "/tmp/release-verify/${WHL_NAME}" "dist/${WHL_NAME}"
+          cp "/tmp/release-verify/${SDIST_NAME}" "dist/${SDIST_NAME}"
+          ls -la dist/
+      - name: Publish canonical distributions to PyPI with PEP 740 attestations
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
+          packages-dir: dist/
+          attestations: true
+          print-hash: true
           skip-existing: true

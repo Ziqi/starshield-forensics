@@ -5,12 +5,13 @@
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
 [![Supply-Chain Attestations](https://github.com/Ziqi/starshield-forensics/actions/workflows/attestations.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
 [![REUSE status](https://img.shields.io/badge/REUSE-3.3%20compliant-brightgreen)](./REUSE.toml)
+[![FSR / ISO 17025 Validation](https://img.shields.io/badge/Validation-FSR--C--107%20%2F%20ISO%2017025%20Aligned-blue)](./VALIDATION_REPORT_FSR_ISO17025.md)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24145804.svg)](https://doi.org/10.5281/zenodo.24145804)
 [![StarShield Deterministic CI](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml)
 
 > **Deterministic Chromium IndexedDB / LevelDB `.log` Multi-Schema Record Carver, Zero-PII Precheck Gate, Structural Image Container Inspector & Financial Checksum Validator**
 >
-> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (`v0.3.7`: [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)) · **OpenSSF Best Practices:** [`#16602 (SILVER — 226%)`](https://www.bestpractices.dev/projects/16602) · **Scorecard:** [`7.1/10`](https://securityscorecards.dev/viewer/?uri=github.com/Ziqi/starshield-forensics) · **Provenance:** [SLSA L3 & Sigstore `/attestations`](https://github.com/Ziqi/starshield-forensics/attestations) · **License:** MIT (`REUSE 3.3`) · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
+> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (`v0.3.7`: [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)) · **OpenSSF Best Practices:** [`#16602 (SILVER — 226%)`](https://www.bestpractices.dev/projects/16602) · **Scorecard:** [`7.1/10`](https://securityscorecards.dev/viewer/?uri=github.com/Ziqi/starshield-forensics) · **Provenance:** [SLSA L3 & Sigstore `/attestations`](https://github.com/Ziqi/starshield-forensics/attestations) · **Method Validation:** [FSR-C-107 / ISO 17025 Dual-Tool Summary](./VALIDATION_REPORT_FSR_ISO17025.md) · **License:** MIT (`REUSE 3.3`) · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
 
 ---
 
@@ -54,6 +55,7 @@ git clone https://github.com/Ziqi/starshield-forensics.git
 cd starshield-forensics
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -m unittest discover -s tests -v
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 benchmark/benchmark_suite.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 scripts/verify_cross_tool_forensics.py
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -m starshield.cli demo
 ```
 
@@ -104,8 +106,9 @@ python3 scripts/generate_spdx_sbom.py --verify
 
 ---
 
-## Governance, Assurance Case & Security Reporting
+## Governance, Method Validation & Security Reporting
 
+- **Dual-Tool Forensic Method Validation (UK FSR `FSR-C-107` / `ISO/IEC 17025` Clause 7.2.2 Aligned):** [`VALIDATION_REPORT_FSR_ISO17025.md`](./VALIDATION_REPORT_FSR_ISO17025.md) (`482` test vectors cross-validated against Google `dfindexeddb 20260210` & `Pillow 13.0.0`; open-source validation aid for accredited laboratories, not a claim of laboratory accreditation)
 - **OpenSSF Security Insights (v2.0.0 / OSPS Baseline) & REUSE 3.3:** [`SECURITY-INSIGHTS.yml`](./SECURITY-INSIGHTS.yml) · [`REUSE.toml`](./REUSE.toml)
 - **Security Assurance Case & 12-Month Roadmap:** [`SECURITY_ASSURANCE_CASE.md`](./SECURITY_ASSURANCE_CASE.md)
 - **Vulnerability Response Policy (48h Ack SLA):** [`SECURITY.md`](./SECURITY.md) · [GitHub Private Vulnerability Reporting](https://github.com/Ziqi/starshield-forensics/security/advisories/new)

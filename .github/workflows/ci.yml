@@ -55,8 +55,10 @@ jobs:
         run: |
           PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error -m coverage run -m unittest discover -s tests -v
           python -m coverage report --include="starshield/*" --fail-under=80
-      - name: Run StarShield-Bench-24 deterministic benchmark
-        run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error benchmark/benchmark_suite.py
+      - name: Run StarShield-Bench-24 deterministic benchmark & cross-tool validation harness
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error benchmark/benchmark_suite.py
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error scripts/verify_cross_tool_forensics.py
       - name: Verify bit-for-bit reproducible zipapp build
         run: |
           python scripts/build_reproducible.py --verify --output dist/starshield.pyz
