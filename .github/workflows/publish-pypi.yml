@@ -8,7 +8,7 @@ on:
       release_tag:
         description: "Signed GitHub Release tag whose canonical wheel/sdist will be published"
         required: false
-        default: "v0.3.7"
+        default: "v0.3.8"
         type: string
 
 permissions:
@@ -34,7 +34,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error scripts/verify_cross_tool_forensics.py
       - name: Fetch & cryptographically verify canonical signed release distributions
         env:
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || 'v0.3.7' }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || 'v0.3.8' }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -63,10 +63,10 @@ jobs:
             grep -E "  (${WHL_NAME}|${SDIST_NAME})$" SHA256SUMS | sha256sum -c -
           )
 
-          if [[ "${RELEASE_TAG}" == "v0.3.7" ]]; then
+          if [[ "${RELEASE_TAG}" == "v0.3.8" ]]; then
             sha256sum -c - <<'EOF'
-          4ffe6454c4ec78d3485326a4ac763ce1abaa1205009b057d07f69ad99dc37730  /tmp/release-verify/starshield_forensics-0.3.7-py3-none-any.whl
-          2dd56e823d46fd41d570ee6281d98db120ad64e64b55950827ef57c186e40edd  /tmp/release-verify/starshield_forensics-0.3.7.tar.gz
+          6f1e045be023b7acd4b3e6f4bf4e4cfce392639bb8b88f1e351369daf13ed817  /tmp/release-verify/starshield_forensics-0.3.8-py3-none-any.whl
+          87afc0617eedd5a760a5ddfb7ab5ba002dc930ff25db7ad7cd2d8bd115e19325  /tmp/release-verify/starshield_forensics-0.3.8.tar.gz
           EOF
           fi
 

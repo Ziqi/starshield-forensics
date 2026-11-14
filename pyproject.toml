@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "starshield-forensics"
-version = "0.3.7"
-description = "Deterministic, offline Chromium IndexedDB/LevelDB write-ahead log (.log) multi-schema record carver, local storage precheck gate, PNG/JPEG ICC container provenance inspector, and multi-jurisdiction financial checksum validator."
+version = "0.3.8"
+description = "Deterministic, offline Chromium & Electron LevelDB (.log) carver, PNG/JPEG screenshot & ICC provenance inspector, ISO-13616/Luhn financial checksum validator, and zero-dependency Model Context Protocol (MCP) server."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -18,8 +18,12 @@ keywords = [
   "dfir",
   "leveldb",
   "indexeddb",
+  "electron",
   "png-metadata",
+  "image-forensics",
   "iban-validator",
+  "mcp",
+  "model-context-protocol",
   "evidence-triage"
 ]
 classifiers = [

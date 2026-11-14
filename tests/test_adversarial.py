@@ -539,6 +539,179 @@ class TestAdversarialForensics(unittest.TestCase):
                 self.assertEqual(main(["inspect-image", str(png_file)]), 0)
             self.assertTrue(json.loads(img_buf.getvalue())["image_container_analysis"]["valid_container"])
 
+    def test_26_mcp_stdio_server_tools_and_privacy_by_default(self) -> None:
+        """Verify MCP JSON-RPC 2.0 lifecycle, 4 read-only tools, dual framing, and zero-leak default redaction."""
+        import sys
+
+        from starshield.mcp_server import handle_mcp_message, run_mcp_stdio_server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            canary_dir = Path(tmpdir) / "CANARY_MCP_ELECTRON_DIR_991"
+            canary_dir.mkdir()
+            (canary_dir / "000003.log").write_bytes(build_synthetic_leveldb_wal_bytes())
+
+            canary_png = Path(tmpdir) / "CANARY_MCP_RECEIPT_992.png"
+            canary_png.write_bytes(
+                build_valid_png_with_iccp(
+                    "Display P3",
+                    "APPL",
+                    software_text="Software\x00CANARY_SECRET_EDITOR_USER_992",
+                    iccp_name="CanaryReceiptProfile",
+                )
+            )
+            missing_img = Path(tmpdir) / "CANARY_MISSING_MCP_PATH_993" / "receipt.png"
+
+            requests = [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}},
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+                {"jsonrpc": "2.0", "id": 3, "method": "resources/list"},
+                {"jsonrpc": "2.0", "id": 4, "method": "resources/templates/list"},
+                {"jsonrpc": "2.0", "id": 5, "method": "prompts/list"},
+                {"jsonrpc": "2.0", "id": 6, "method": "tools/list"},
+                {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "starshield_demo"}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "tools/call",
+                    "params": {"name": "starshield_precheck_leveldb", "arguments": {"target_path": str(canary_dir)}},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {"name": "starshield_inspect_image_tamper", "arguments": {"image_path": str(canary_png)}},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 10,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "starshield_validate_financial_iocs",
+                        "arguments": {
+                            "text": "Wire to IBAN GB82WEST12345698765432 (SWIFT NWBKGB2LXXX), Sort Code 00-00-00 Account 00000000."
+                        },
+                    },
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 11,
+                    "method": "tools/call",
+                    "params": {"name": "starshield_inspect_image_tamper", "arguments": {"image_path": str(missing_img)}},
+                },
+                {"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "unknown_tool"}},
+                {"jsonrpc": "2.0", "id": 13, "method": "unknown/method"},
+            ]
+
+            in_bytes = b"\n".join(json.dumps(r).encode("utf-8") for r in requests) + b"\n{malformed_json\n"
+            out_stream = io.BytesIO()
+            rc = run_mcp_stdio_server(
+                redact=True,
+                instream=io.BytesIO(in_bytes),
+                outstream=out_stream,
+            )
+            self.assertEqual(rc, 0)
+
+            raw_output = out_stream.getvalue().decode("utf-8")
+            # Zero path/canary/raw-IBAN leaks in default masked mode across the entire RPC transcript
+            for forbidden in (
+                "CANARY_MCP_ELECTRON_DIR_991",
+                "CANARY_MCP_RECEIPT_992",
+                "CANARY_SECRET_EDITOR_USER_992",
+                "CanaryReceiptProfile",
+                "CANARY_MISSING_MCP_PATH_993",
+                "GB82WEST12345698765432",
+            ):
+                self.assertNotIn(forbidden, raw_output)
+
+            lines = [json.loads(line) for line in raw_output.strip().splitlines()]
+            by_id = {item.get("id"): item for item in lines if item.get("id") is not None}
+            # Notification produced no response; 13 ID'd requests + 1 parse error = 14 lines
+            self.assertEqual(len(lines), 14)
+            self.assertEqual(by_id[1]["result"]["protocolVersion"], "2025-03-26")
+            self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "starshield-forensics")
+            self.assertEqual(by_id[2]["result"], {})
+            self.assertEqual(by_id[3]["result"]["resources"], [])
+            self.assertEqual(by_id[4]["result"]["resourceTemplates"], [])
+            self.assertEqual(by_id[5]["result"]["prompts"], [])
+            self.assertEqual(len(by_id[6]["result"]["tools"]), 4)
+
+            self.assertFalse(by_id[7]["result"]["isError"])
+            pre_res = json.loads(by_id[8]["result"]["content"][0]["text"])
+            self.assertEqual(pre_res["precheck_manifest"]["feasibility_verdict"], "GO")
+
+            img_res = json.loads(by_id[9]["result"]["content"][0]["text"])
+            self.assertTrue(img_res["image_container_analysis"]["valid_container"])
+            self.assertEqual(img_res["acquisition_manifest"]["source_label"], "[REDACTED_SOURCE_LABEL]")
+
+            ioc_res = json.loads(by_id[10]["result"]["content"][0]["text"])
+            self.assertTrue(ioc_res["masked_mode"])
+            self.assertTrue(ioc_res["validated_iocs"]["mod97_validated_ibans"][0].startswith("[REDACTED_HMAC:"))
+
+            # Missing file returns tool-level isError=True with scrubbed path
+            self.assertTrue(by_id[11]["result"]["isError"])
+            self.assertEqual(by_id[12]["error"]["code"], -32602)
+            self.assertEqual(by_id[13]["error"]["code"], -32601)
+            self.assertEqual(lines[-1]["error"]["code"], -32700)
+
+            # Verify Content-Length header framing & unredacted lab mode + CLI entrypoint
+            cl_req_body = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 99,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "starshield_validate_financial_iocs",
+                        "arguments": {"text": "IBAN GB82WEST12345698765432"},
+                    },
+                }
+            ).encode("utf-8")
+            cl_frame = f"Content-Length: {len(cl_req_body)}\r\nContent-Type: application/vscode-jsonrpc\r\n\r\n".encode(
+                "ascii"
+            ) + cl_req_body
+            cl_out = io.BytesIO()
+            self.assertEqual(
+                run_mcp_stdio_server(redact=False, instream=io.BytesIO(cl_frame), outstream=cl_out),
+                0,
+            )
+            cl_raw = cl_out.getvalue()
+            self.assertTrue(cl_raw.startswith(b"Content-Length: "))
+            cl_json = json.loads(cl_raw.split(b"\r\n\r\n", 1)[1].decode("utf-8"))
+            unred_ioc = json.loads(cl_json["result"]["content"][0]["text"])
+            self.assertFalse(unred_ioc["masked_mode"])
+            self.assertEqual(unred_ioc["validated_iocs"]["mod97_validated_ibans"], ["GB82WEST12345698765432"])
+
+            # Protocol edge cases via handle_mcp_message & CLI `starshield mcp`
+            self.assertEqual(handle_mcp_message("not-a-dict")["error"]["code"], -32600)
+            self.assertEqual(handle_mcp_message({"jsonrpc": "2.0", "id": 1})["error"]["code"], -32600)
+            self.assertEqual(
+                handle_mcp_message({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": []})["error"]["code"],
+                -32602,
+            )
+            fallback_init = handle_mcp_message(
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "1999-01-01"}}
+            )
+            self.assertEqual(fallback_init["result"]["protocolVersion"], "2024-11-05")
+
+            # CLI `starshield mcp` smoke test via mocked stdin/stdout buffers
+            class _StdWrapper(io.TextIOWrapper):
+                pass
+
+            cli_in = _StdWrapper(io.BytesIO(b'{"jsonrpc":"2.0","id":77,"method":"ping"}\n'), encoding="utf-8")
+            cli_out_buf = io.BytesIO()
+            cli_out = _StdWrapper(cli_out_buf, encoding="utf-8", write_through=True)
+            orig_in, orig_out = sys.stdin, sys.stdout
+            try:
+                sys.stdin = cli_in
+                sys.stdout = cli_out
+                self.assertEqual(main(["mcp"]), 0)
+            finally:
+                sys.stdin = orig_in
+                sys.stdout = orig_out
+            cli_resp = json.loads(cli_out_buf.getvalue().decode("utf-8").strip())
+            self.assertEqual(cli_resp["id"], 77)
+            self.assertEqual(cli_resp["result"], {})
+
 
 if __name__ == "__main__":
     unittest.main()
