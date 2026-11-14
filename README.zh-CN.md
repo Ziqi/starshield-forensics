@@ -5,7 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/starshield-forensics?label=PyPI%20%28PEP%20740%29&color=blue)](https://pypi.org/project/starshield-forensics/0.3.7/)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
 [![REUSE status](https://img.shields.io/badge/REUSE-3.3%20compliant-brightgreen)](./REUSE.toml)
-[![FSR / ISO 17025 Validation](https://img.shields.io/badge/Validation-FSR--C--107%20%2F%20ISO%2017025%20Aligned-blue)](./VALIDATION_REPORT_FSR_ISO17025.md)
+[![UK FSR Statutory Code / ISO 17025 Validation](https://img.shields.io/badge/Validation-UK%20FSR%20%28FSA--DIG--100%29%20%26%20ISO%2017025%20Aligned-blue)](./VALIDATION_REPORT_FSR_ISO17025.md)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24145804.svg)](https://doi.org/10.5281/zenodo.24145804)
 
 > **[English (`README.md`)](./README.md)** | **简体中文**
@@ -14,7 +14,7 @@
 - **获颁 Linux 基金会 OpenSSF Best Practices `Silver` 银牌认证（[`#16602` · 226%](https://www.bestpractices.dev/projects/16602)）**
 - **PyPI 官方受信发布（PEP 740 数字证明）：** [`pip install starshield-forensics`](https://pypi.org/project/starshield-forensics/0.3.7/)
 - **学术永久 DOI（Zenodo）：** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804)
-- **双工具方法学验证：** 对齐英国取证科学监管机构 **FSR-C-107 / ISO/IEC 17025** 验证框架（见 [`VALIDATION_REPORT_FSR_ISO17025.md`](./VALIDATION_REPORT_FSR_ISO17025.md)）
+- **双工具方法学验证：** 对齐英国法医科学监管机构现行法定守则 **UK FSR Statutory Code (`FSA – DIG 100`，承接并替代原 `FSR-C-107`) & ISO/IEC 17025** 验证框架（见 [`VALIDATION_REPORT_FSR_ISO17025.md`](./VALIDATION_REPORT_FSR_ISO17025.md)）
 - **在线文档与脱敏底稿门户：** [`https://ziqi.github.io/starshield/`](https://ziqi.github.io/starshield/)
 
 ---
@@ -42,12 +42,14 @@
 
 ---
 
-## 30 秒快速上手
+## 10 秒零安装体验与快速上手
 
 ```bash
-pip install starshield-forensics
+# 免克隆免建虚拟环境单行体验内置 100% 净室合成样本（零网络外联）：
+uvx --from starshield-forensics starshield demo
 
-# 运行内置 100% 净室合成样本演示（零网络请求）
+# 或通过官方 PyPI 安装（带 PEP 740 数字证明）：
+pip install starshield-forensics
 starshield demo
 
 # 对本地目录执行零明文取证可行性预检

@@ -6,7 +6,7 @@
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
 [![Supply-Chain Attestations](https://github.com/Ziqi/starshield-forensics/actions/workflows/attestations.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
 [![REUSE status](https://img.shields.io/badge/REUSE-3.3%20compliant-brightgreen)](./REUSE.toml)
-[![FSR / ISO 17025 Validation](https://img.shields.io/badge/Validation-FSR--C--107%20%2F%20ISO%2017025%20Aligned-blue)](./VALIDATION_REPORT_FSR_ISO17025.md)
+[![UK FSR Statutory Code / ISO 17025 Validation](https://img.shields.io/badge/Validation-UK%20FSR%20%28FSA--DIG--100%29%20%26%20ISO%2017025%20Aligned-blue)](./VALIDATION_REPORT_FSR_ISO17025.md)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24145804.svg)](https://doi.org/10.5281/zenodo.24145804)
 [![StarShield Deterministic CI](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml)
 
@@ -14,7 +14,7 @@
 
 > **Deterministic Chromium IndexedDB / LevelDB `.log` Multi-Schema Record Carver, Zero-PII Precheck Gate, Structural Image Container Inspector & Financial Checksum Validator**
 >
-> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **PyPI:** [`starshield-forensics 0.3.7 (PEP 740)`](https://pypi.org/project/starshield-forensics/0.3.7/) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (`v0.3.7`: [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)) · **OpenSSF Best Practices:** [`#16602 (SILVER — 226%)`](https://www.bestpractices.dev/projects/16602) · **Scorecard:** [`7.3/10`](https://github.com/Ziqi/starshield-forensics/actions/workflows/scorecard.yml) · **Provenance:** [SLSA L3 & Sigstore `/attestations`](https://github.com/Ziqi/starshield-forensics/attestations) · **Method Validation:** [FSR-C-107 / ISO 17025 Dual-Tool Summary](./VALIDATION_REPORT_FSR_ISO17025.md) · **License:** MIT (`REUSE 3.3`) · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
+> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **PyPI:** [`starshield-forensics 0.3.7 (PEP 740)`](https://pypi.org/project/starshield-forensics/0.3.7/) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (`v0.3.7`: [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)) · **OpenSSF Best Practices:** [`#16602 (SILVER — 226%)`](https://www.bestpractices.dev/projects/16602) · **Scorecard:** [`Live Badge`](https://github.com/Ziqi/starshield-forensics/actions/workflows/scorecard.yml) · **Provenance:** [SLSA L3 & Sigstore `/attestations`](https://github.com/Ziqi/starshield-forensics/attestations) · **Method Validation:** [UK FSR Statutory Code (`FSA – DIG 100`) / ISO 17025 Summary](./VALIDATION_REPORT_FSR_ISO17025.md) · **License:** MIT (`REUSE 3.3`) · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
 
 ---
 
@@ -46,9 +46,12 @@ Every analytical output carries an explicit machine-readable epistemic tier so i
 
 ---
 
-## Installation (`pip` PEP 740 / Zero-Install `.pyz`) & `StarShield-Bench-24` Quickstart
+## 10-Second Zero-Install Tryout (`uvx`) & Installation (`pip` PEP 740 / `.pyz`)
 
 ```bash
+# Instant zero-install clean-room showcase (fetches PyPI wheel directly, zero repo clone needed):
+uvx --from starshield-forensics starshield demo
+
 # Option A — Official PyPI package (with PEP 740 Sigstore digital attestations, zero dependencies):
 pip install starshield-forensics
 starshield demo
@@ -115,7 +118,7 @@ python3 scripts/generate_spdx_sbom.py --verify
 
 ## Governance, Method Validation & Security Reporting
 
-- **Dual-Tool Forensic Method Validation (UK FSR `FSR-C-107` / `ISO/IEC 17025` Clause 7.2.2 Aligned):** [`VALIDATION_REPORT_FSR_ISO17025.md`](./VALIDATION_REPORT_FSR_ISO17025.md) (`482` test vectors cross-validated against Google `dfindexeddb 20260210` & `Pillow 13.0.0`; open-source validation aid for accredited laboratories, not a claim of laboratory accreditation)
+- **Dual-Tool Forensic Method Validation (UK FSR Statutory Code `FSA – DIG 100` [superseding `FSR-C-107`] & `ISO/IEC 17025` Clause 7.2.2 Aligned):** [`VALIDATION_REPORT_FSR_ISO17025.md`](./VALIDATION_REPORT_FSR_ISO17025.md) (`482` test vectors cross-validated against Google `dfindexeddb 20260210` & `Pillow 13.0.0`; open-source validation aid for accredited laboratories, not a claim of laboratory accreditation)
 - **OpenSSF Security Insights (v2.0.0 / OSPS Baseline) & REUSE 3.3:** [`SECURITY-INSIGHTS.yml`](./SECURITY-INSIGHTS.yml) · [`REUSE.toml`](./REUSE.toml)
 - **Security Assurance Case & 12-Month Roadmap:** [`SECURITY_ASSURANCE_CASE.md`](./SECURITY_ASSURANCE_CASE.md)
 - **Vulnerability Response Policy (48h Ack SLA):** [`SECURITY.md`](./SECURITY.md) · [GitHub Private Vulnerability Reporting](https://github.com/Ziqi/starshield-forensics/security/advisories/new)

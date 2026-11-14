@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Ziqi Xiao
+# SPDX-License-Identifier: MIT
+
+language: python
+main_repo: "https://github.com/Ziqi/starshield-forensics"
+sanitizers:
+  - address
+  - undefined

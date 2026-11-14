@@ -3,10 +3,10 @@ SPDX-FileCopyrightText: 2026 Ziqi Xiao (@Ziqi)
 SPDX-License-Identifier: MIT
 -->
 
-# Dual-Tool Forensic Method Validation Summary (`FSR-C-107` / `ISO/IEC 17025` Clause 7.2.2 Alignment)
+# Dual-Tool Forensic Method Validation Summary (UK FSR Statutory Code `FSA – DIG 100` & `ISO/IEC 17025` Clause 7.2.2 Alignment)
 
 > [!IMPORTANT]
-> **Scope & Accreditation Disclaimer**: Self-contained open-source tool validation summary structured in alignment with UK Forensic Science Regulator (FSR) Code of Practice (`FSR-C-100` / `FSR-C-107`) and `ISO/IEC 17025:2017` Clause 7.2.2 to assist accredited forensic laboratories, Expert Witnesses, and instructing solicitors in their local method-validation workflows — **not a claim of laboratory accreditation**. Under UK Criminal Procedure Rules (`CrimPR Part 19`), Civil Procedure Rules (`CPR Part 35`), and `FSR-C-107`, final validation sign-off within a specific laboratory environment remains the responsibility of the deploying forensic unit.
+> **Scope & Accreditation Disclaimer**: Self-contained open-source tool validation summary structured in alignment with the **UK Forensic Science Regulator (FSR) Statutory Code of Practice** (*Forensic Science Regulator Act 2021*, Forensic Science Activity **`FSA – DIG 100`**: *Data capture, processing and analysis from digital storage devices*, which superseded the legacy `FSR-C-107` / `FSR-C-100` digital forensics appendices) and **`ISO/IEC 17025:2017` Clause 7.2.2** to assist accredited forensic laboratories, Expert Witnesses, and instructing solicitors in their local method-validation workflows — **not a claim of laboratory accreditation**. Legacy `FSR-C-107` mapping references are preserved for backward compatibility with existing laboratory SOPs. Under UK Criminal Procedure Rules (`CrimPR Part 19`), Civil Procedure Rules (`CPR Part 35`), and the UK FSR Statutory Code of Practice, final validation sign-off within a specific laboratory environment remains the responsibility of the deploying forensic unit.
 
 ---
 
@@ -36,7 +36,7 @@ SPDX-License-Identifier: MIT
 | **SLSA Build Level 3 Provenance** | `multiple.intoto.jsonl` (`048cba50acd4cc8250368df5dcaa3753fc189fa8ee6fc7fcfb4b0b7a8517fafc`) |
 | **SPDX 2.3 Software Bill of Materials** | `starshield-forensics-0.3.7.spdx.json` (`67ce4adc4033db1051e7c46344e4ffb8ae2d075a71a485f02691a7974a676a3b`) |
 | **Archival Zenodo DOI** | [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262) (Concept DOI `10.5281/zenodo.24145804`) |
-| **OpenSSF Supply-Chain Posture** | OpenSSF Best Practices **SILVER** ([`#16602`](https://www.bestpractices.dev/en/projects/16602), `226%`) · OpenSSF Scorecard **`7.1/10`** |
+| **OpenSSF Supply-Chain Posture** | OpenSSF Best Practices **SILVER** ([`#16602`](https://www.bestpractices.dev/en/projects/16602), `226%`) · Continuous OpenSSF Scorecard & ClusterFuzzLite/Atheris Fuzzing |
 | **Reference Python Runtime** | CPython `3.12.13` (`Darwin-arm64` QA run) + Ubuntu GitHub Actions CI matrix (`3.10`, `3.11`, `3.12`, `3.13`) |
 | **External Comparator 1 (LevelDB WAL)** | Google [`dfindexeddb`](https://github.com/google/dfindexeddb) `20260210` (`Apache-2.0`, `dfindexeddb.leveldb.log.FileReader`, isolated QA venv) |
 | **External Comparator 2 (PNG / JPEG / ICC)** | [`Pillow`](https://python-pillow.org/) `13.0.0` (`PIL.Image`, isolated QA venv) + clean-room RFC 2083 / ISO 10918-1 reference verifiers |
