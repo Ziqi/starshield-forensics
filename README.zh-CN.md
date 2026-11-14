@@ -2,20 +2,26 @@
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16602/badge)](https://www.bestpractices.dev/projects/16602)
 [![OpenSSF Scorecard](https://img.shields.io/endpoint?url=https%3A%2F%2Fziqi.github.io%2Fstarshield%2Fscorecard.json)](https://github.com/Ziqi/starshield-forensics/actions/workflows/scorecard.yml)
+[![Fuzzing: 10/10](https://img.shields.io/badge/Scorecard%20Fuzzing-10%2F10%20%28ClusterFuzzLite%29-brightgreen)](https://github.com/Ziqi/starshield-forensics/actions/workflows/cflite.yml)
+[![Continuous Fuzzing](https://github.com/Ziqi/starshield-forensics/actions/workflows/cflite.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/cflite.yml)
+[![CodeQL SAST](https://github.com/Ziqi/starshield-forensics/actions/workflows/codeql.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/codeql.yml)
 [![PyPI](https://img.shields.io/pypi/v/starshield-forensics?label=PyPI%20%28PEP%20740%29&color=blue)](https://pypi.org/project/starshield-forensics/0.3.7/)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
+[![Supply-Chain Attestations](https://github.com/Ziqi/starshield-forensics/actions/workflows/attestations.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
 [![REUSE status](https://img.shields.io/badge/REUSE-3.3%20compliant-brightgreen)](./REUSE.toml)
 [![UK FSR Statutory Code / ISO 17025 Validation](https://img.shields.io/badge/Validation-UK%20FSR%20%28FSA--DIG--100%29%20%26%20ISO%2017025%20Aligned-blue)](./VALIDATION_REPORT_FSR_ISO17025.md)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24145804.svg)](https://doi.org/10.5281/zenodo.24145804)
+[![StarShield Deterministic CI](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml)
 
 > **[English (`README.md`)](./README.md)** | **简体中文**
 
 **面向司法取证官、蓝队应急响应与跨境合规团队的纯离线、只读、零第三方运行依赖（Python >= 3.10 纯标准库）电子证据初筛库：**
 - **获颁 Linux 基金会 OpenSSF Best Practices `Silver` 银牌认证（[`#16602` · 226%](https://www.bestpractices.dev/projects/16602)）**
+- **供应链安全评分与持续模糊测试：** **OpenSSF Scorecard [`7.9 / 10`](https://github.com/Ziqi/starshield-forensics/actions/workflows/scorecard.yml)**（含 `ClusterFuzzLite / Atheris` 持续模糊测试 **`Fuzzing: 10 / 10` 满分**，共 `11` 项核心指标满分）+ **SLSA Build Level 3** 构建溯源证明（[`/attestations`](https://github.com/Ziqi/starshield-forensics/attestations)）
 - **PyPI 官方受信发布（PEP 740 数字证明）：** [`pip install starshield-forensics`](https://pypi.org/project/starshield-forensics/0.3.7/)
-- **学术永久 DOI（Zenodo）：** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804)
+- **学术永久 DOI（Zenodo）：** Concept DOI [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804)（`v0.3.7`：[`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)）
 - **双工具方法学验证：** 对齐英国法医科学监管机构现行法定守则 **UK FSR Statutory Code (`FSA – DIG 100`，承接并替代原 `FSR-C-107`) & ISO/IEC 17025** 验证框架（见 [`VALIDATION_REPORT_FSR_ISO17025.md`](./VALIDATION_REPORT_FSR_ISO17025.md)）
-- **在线文档与脱敏底稿门户：** [`https://ziqi.github.io/starshield/`](https://ziqi.github.io/starshield/)
+- **在线文档与净室合成基准底稿门户：** [`https://ziqi.github.io/starshield/`](https://ziqi.github.io/starshield/)
 
 ---
 

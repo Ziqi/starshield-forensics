@@ -1,7 +1,7 @@
 header:
   schema-version: '2.0.0'
-  last-updated: '2026-11-13'
-  last-reviewed: '2026-11-13'
+  last-updated: '2026-11-14'
+  last-reviewed: '2026-11-14'
   url: https://github.com/Ziqi/starshield-forensics/blob/main/SECURITY-INSIGHTS.yml
   comment: >
     Machine-readable OpenSSF Security Insights (v2.0.0) and OSPS baseline
@@ -51,7 +51,7 @@ project:
       Reporting (https://github.com/Ziqi/starshield-forensics/security/advisories/new)
       with a 48-hour acknowledgment SLA.
   documentation:
-    quickstart-guide: https://github.com/Ziqi/starshield-forensics#installation-zero-install-pyz--starshield-bench-24-quickstart
+    quickstart-guide: https://github.com/Ziqi/starshield-forensics#10-second-zero-install-tryout-uvx--installation-pip-pep-740--pyz
     detailed-guide: https://ziqi.github.io/starshield/
     code-of-conduct: https://github.com/Ziqi/starshield-forensics/blob/main/CODE_OF_CONDUCT.md
     release-process: https://github.com/Ziqi/starshield-forensics/blob/main/SECURITY_ASSURANCE_CASE.md
@@ -119,13 +119,22 @@ repository:
           comment: Certified OpenSSF Best Practices Silver badge with 226% tiered completion.
         - name: OpenSSF Security Scorecard
           evidence: https://securityscorecards.dev/viewer/?uri=github.com/Ziqi/starshield-forensics
-          date: '2026-11-12'
-          comment: Continuous supply-chain security audit published via OIDC workflow.
+          date: '2026-11-14'
+          comment: Continuous supply-chain security audit published via OIDC workflow (7.9/10 overall; 11 checks at 10/10 including Fuzzing, SAST, Packaging, Token-Permissions, Binary-Artifacts, Dangerous-Workflow, Dependency-Update-Tool, Security-Policy, Vulnerabilities, CI-Tests, and License).
     champions:
       - name: Ziqi Xiao
         email: 2196305+Ziqi@users.noreply.github.com
         primary: true
     tools:
+      - name: ClusterFuzzLite / Atheris
+        type: Fuzzing
+        rulesets:
+          - coverage-guided-and-stdlib-mutation
+        integration:
+          adhoc: true
+          ci: true
+          release: true
+        results: {}
       - name: CodeQL
         type: SAST
         rulesets:

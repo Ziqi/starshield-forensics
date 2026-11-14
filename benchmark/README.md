@@ -1,4 +1,4 @@
-# `StarShield-Bench-24` (`v1.0.0` · Paired with `starshield-forensics v0.3.6`)
+# `StarShield-Bench-24` (`v1.0.0` · Paired with `starshield-forensics v0.3.7`)
 
 > **24-Case Deterministic Evidentiary Triage & Adversarial Prompt-Injection Benchmark**  
 > **Author:** Ziqi Xiao (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) · **License:** MIT · **Classification:** `TLP:CLEAR (100% Synthetic)`
@@ -39,7 +39,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 benchmark_suite.py --output-dir ./artifacts
 
 ## 3. Official Zenodo Archival & Academic Citation (`10.5281/zenodo.24145804`)
 
-`starshield-forensics v0.3.6` and `StarShield-Bench-24 v1.0.0` are permanently archived at CERN / Zenodo:
+`starshield-forensics v0.3.7` and `StarShield-Bench-24 v1.0.0` are permanently archived at CERN / Zenodo and paired with the 482-vector dual-tool validation report ([`VALIDATION_REPORT_FSR_ISO17025.md`](../VALIDATION_REPORT_FSR_ISO17025.md), aligned with UK FSR Statutory Code `FSA – DIG 100` [superseding `FSR-C-107`] & `ISO/IEC 17025` Clause 7.2.2):
 - **Concept DOI (Always Latest):** [`https://doi.org/10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804)
-- **Version `v0.3.6` DOI:** [`https://doi.org/10.5281/zenodo.24151431`](https://doi.org/10.5281/zenodo.24151431) ([`Record #24151431`](https://zenodo.org/records/24151431))
+- **Version `v0.3.7` DOI:** [`https://doi.org/10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262) ([`Record #24156262`](https://zenodo.org/records/24156262))
+- **Prior Version `v0.3.6` DOI:** [`https://doi.org/10.5281/zenodo.24151431`](https://doi.org/10.5281/zenodo.24151431)
 - **Machine-Readable Citation:** See [`CITATION.cff`](https://github.com/Ziqi/starshield-forensics/blob/main/CITATION.cff) in the repository root.
