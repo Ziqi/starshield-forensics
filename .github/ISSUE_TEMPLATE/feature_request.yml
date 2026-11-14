@@ -1,0 +1,19 @@
+name: Feature Request
+description: Propose an architecture, CLI, or documentation improvement for starshield-forensics
+title: "[Feat]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation & Use Case
+      description: Explain the operational problem or standards requirement this addresses.
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed Solution
+      description: Describe desired CLI flags, schema fields, or documentation additions.
+    validations:
+      required: true

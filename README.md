@@ -10,6 +10,8 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24145804.svg)](https://doi.org/10.5281/zenodo.24145804)
 [![StarShield Deterministic CI](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml)
 
+> **English** | **[简体中文 (`README.zh-CN.md`)](./README.zh-CN.md)**
+
 > **Deterministic Chromium IndexedDB / LevelDB `.log` Multi-Schema Record Carver, Zero-PII Precheck Gate, Structural Image Container Inspector & Financial Checksum Validator**
 >
 > **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **PyPI:** [`starshield-forensics 0.3.7 (PEP 740)`](https://pypi.org/project/starshield-forensics/0.3.7/) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (`v0.3.7`: [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)) · **OpenSSF Best Practices:** [`#16602 (SILVER — 226%)`](https://www.bestpractices.dev/projects/16602) · **Scorecard:** [`7.3/10`](https://github.com/Ziqi/starshield-forensics/actions/workflows/scorecard.yml) · **Provenance:** [SLSA L3 & Sigstore `/attestations`](https://github.com/Ziqi/starshield-forensics/attestations) · **Method Validation:** [FSR-C-107 / ISO 17025 Dual-Tool Summary](./VALIDATION_REPORT_FSR_ISO17025.md) · **License:** MIT (`REUSE 3.3`) · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
