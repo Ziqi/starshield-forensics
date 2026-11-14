@@ -2,31 +2,22 @@
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16602/badge)](https://www.bestpractices.dev/projects/16602)
 [![OpenSSF Scorecard](https://img.shields.io/endpoint?url=https%3A%2F%2Fziqi.github.io%2Fstarshield%2Fscorecard.json)](https://github.com/Ziqi/starshield-forensics/actions/workflows/scorecard.yml)
-[![Fuzzing: 10/10](https://img.shields.io/badge/Scorecard%20Fuzzing-10%2F10%20%28ClusterFuzzLite%29-brightgreen)](https://github.com/Ziqi/starshield-forensics/actions/workflows/cflite.yml)
-[![OSPS Baseline](https://img.shields.io/badge/OpenSSF%20OSPS%20Baseline-Level%203%20%28EU%20CRA%20Aligned%29-brightgreen)](./SECURITY.md#5-openssf-osps-baseline-level-3--eu-cyber-resilience-act-cra-alignment)
-[![Continuous Fuzzing](https://github.com/Ziqi/starshield-forensics/actions/workflows/cflite.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/cflite.yml)
-[![CodeQL SAST](https://github.com/Ziqi/starshield-forensics/actions/workflows/codeql.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/codeql.yml)
-[![PyPI](https://img.shields.io/pypi/v/starshield-forensics?label=PyPI%20%28PEP%20740%29&color=blue)](https://pypi.org/project/starshield-forensics/0.3.7/)
-[![Homebrew Tap](https://img.shields.io/badge/Homebrew-Ziqi%2Ftap-FBB040.svg?logo=homebrew&logoColor=white)](https://github.com/Ziqi/homebrew-tap)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
-[![Supply-Chain Attestations](https://github.com/Ziqi/starshield-forensics/actions/workflows/attestations.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/attestations)
-[![REUSE status](https://img.shields.io/badge/REUSE-3.3%20compliant-brightgreen)](./REUSE.toml)
+[![OSPS Baseline](https://img.shields.io/badge/OpenSSF%20OSPS%20Baseline-Level%203%20%28EU%20CRA%20Aligned%29-brightgreen)](./SECURITY.md#5-openssf-osps-baseline-level-3--eu-cyber-resilience-act-cra-alignment)
 [![UK FSR Statutory Code / ISO 17025 Validation](https://img.shields.io/badge/Validation-UK%20FSR%20%28FSA--DIG--100%29%20%26%20ISO%2017025%20Aligned-blue)](./VALIDATION_REPORT_FSR_ISO17025.md)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24145804.svg)](https://doi.org/10.5281/zenodo.24145804)
-[![SWHID](https://img.shields.io/badge/SWHID-swh%3A1%3Asnp%3A4ed5efec-e20026)](https://archive.softwareheritage.org/swh:1:snp:4ed5efecab5e40975e75a5c5107b63121b1df60a;origin=https://github.com/Ziqi/starshield-forensics)
-[![StarShield Deterministic CI](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/starshield-forensics?label=PyPI%20%28PEP%20740%29&color=blue)](https://pypi.org/project/starshield-forensics/0.3.7/)
 
 > **English** | **[简体中文 (`README.zh-CN.md`)](./README.zh-CN.md)**
 
-> **Deterministic Chromium IndexedDB / LevelDB `.log` Multi-Schema Record Carver, Zero-PII Precheck Gate, Structural Image Container Inspector & Financial Checksum Validator**
+> **Deterministic Chromium & Electron IndexedDB / LevelDB `.log` Multi-Schema Record Carver, Zero-PII Precheck Gate, Structural Image Container Inspector & Financial Checksum Validator**
 >
-> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **PyPI:** [`starshield-forensics 0.3.7 (PEP 740)`](https://pypi.org/project/starshield-forensics/0.3.7/) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (`v0.3.7`: [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)) · **OpenSSF Best Practices:** [`#16602 (SILVER — 226%)`](https://www.bestpractices.dev/projects/16602) · **Scorecard:** [`7.9 / 10 (Fuzzing 10/10 · 11/18 Perfect Checks)`](https://github.com/Ziqi/starshield-forensics/actions/workflows/scorecard.yml) · **Provenance:** [SLSA L3 & Sigstore `/attestations`](https://github.com/Ziqi/starshield-forensics/attestations) · **Method Validation:** [UK FSR Statutory Code (`FSA – DIG 100`) / ISO 17025 Summary](./VALIDATION_REPORT_FSR_ISO17025.md) · **License:** MIT (`REUSE 3.3`) · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
+> **Author:** [Ziqi Xiao](https://ziqi.github.io/starshield/) (`@Ziqi`) · **PyPI:** [`starshield-forensics 0.3.7 (PEP 740)`](https://pypi.org/project/starshield-forensics/0.3.7/) · **Homebrew:** [`Ziqi/tap/starshield-forensics`](https://github.com/Ziqi/homebrew-tap) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (`v0.3.7`: [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262)) · **SWHID:** [`swh:1:snp:4ed5efec...`](https://archive.softwareheritage.org/swh:1:snp:4ed5efecab5e40975e75a5c5107b63121b1df60a;origin=https://github.com/Ziqi/starshield-forensics) · **OpenSSF Best Practices:** [`#16602 (SILVER — 226%)`](https://www.bestpractices.dev/projects/16602) · **Scorecard:** [`7.9 / 10 (Fuzzing 10/10 · 11/18 Perfect Checks)`](https://github.com/Ziqi/starshield-forensics/actions/workflows/scorecard.yml) · **Provenance:** [SLSA L3 & Sigstore `/attestations`](https://github.com/Ziqi/starshield-forensics/attestations) · **Method Validation:** [UK FSR Statutory Code (`FSA – DIG 100`) / ISO 17025 Summary](./VALIDATION_REPORT_FSR_ISO17025.md) · **License:** MIT (`REUSE 3.3`) · **Runtime:** Python >= 3.10 (stdlib only, zero network calls, zero LLM dependencies)
 
 ---
 
 ## Scope & Operational Notice
 
-`starshield-forensics` is an **offline, read-only digital forensics and pre-action evidence triage library** for inspecting local Chromium storage write-ahead logs (`.log`), running zero-PII intake feasibility checks (`starshield precheck`), triaging exported web-messaging / B2B portal JSON caches, inspecting PNG/JPEG ICC metadata structures, and validating multi-jurisdiction payment identifiers (ISO/IEC 7812 Luhn, ISO 13616 IBAN Mod-97, ISO 9362 SWIFT/BIC, and intra-message UK Sort Code pairs).
+`starshield-forensics` is an **offline, read-only digital forensics and pre-action evidence triage library** for inspecting local Chromium-based browser (`Chrome`, `Edge`, `Brave`) and **Electron desktop application (`Microsoft Teams`, `Slack`, `WhatsApp Desktop`, `Discord`)** IndexedDB / Local Storage write-ahead logs (`.log`), running zero-PII intake feasibility checks (`starshield precheck`), triaging exported web-messaging / B2B portal JSON caches, inspecting PNG/JPEG ICC metadata structures, and validating multi-jurisdiction payment identifiers (ISO/IEC 7812 Luhn, ISO 13616 IBAN Mod-97, ISO 9362 SWIFT/BIC, and intra-message UK Sort Code pairs).
 
 All bundled fixtures in `samples/` and `starshield/data/`—plus the seeded 24-case evaluation suite in `benchmark/benchmark_suite.py` (`StarShield-Bench-24`)—are **100% clean-room specification test vectors** modeled on a fictional 2025 UK supplier-invoice scenario (`GBP 18,400.00`, ISO-13616 example IBANs `GB82WEST12345698765432` and `NO9386011117947`, Luhn test string `6200000000000005`). Zero real incident data or PII is included.
 
@@ -43,8 +34,8 @@ Every analytical output carries an explicit machine-readable epistemic tier so i
 
 | Module | Capability in `v0.3.7` | Epistemic Boundary & Known Limitations |
 | :--- | :--- | :--- |
-| **Zero-PII Storage Feasibility Gate** (`precheck`) | Scans Chromium IndexedDB / Local Storage folders or `.log`/`.ldb` files offline, checks LevelDB SSTable footer magic (`0xdb4775248b80fb57`), `.blob` directories, and Blink `0xFF` headers, emitting a deterministic `GO` / `PARTIAL` / `NO_GO_COMPACTED_OR_UNSUPPORTED` manifest with zero plaintext leakage. | *Pre-screens compaction status prior to triage; does not decompress `.ldb` blocks.* |
-| **Chromium LevelDB `.log` Multi-Schema Carver** (`leveldb_log.py`) | Parses 32 KiB physical blocks, verifies masked Castagnoli CRC32C (`0xA282EAD8`), reassembles cross-block `FULL`/`FIRST`/`MIDDLE`/`LAST` WriteBatch frames, and extracts UTF-8 & Blink UTF-16LE JSON records across `chatsvc` (Teams/Skype), Slack Web, WhatsApp/Web Messenger, and B2B invoice portals (`--schema auto\|chatsvc\|generic-json`). | *Does not decompress Snappy `.ldb` SSTables or decode non-JSON Blink `StructuredClone` primitives (roadmap: `v0.4`).* |
+| **Zero-PII Storage Feasibility Gate** (`precheck`) | Scans Chromium & Electron IndexedDB / Local Storage folders or `.log`/`.ldb` files offline, checks LevelDB SSTable footer magic (`0xdb4775248b80fb57`), `.blob` directories, and Blink `0xFF` headers, emitting a deterministic `GO` / `PARTIAL` / `NO_GO_COMPACTED_OR_UNSUPPORTED` manifest with zero plaintext leakage. | *Pre-screens compaction status prior to triage; does not decompress `.ldb` blocks.* |
+| **Chromium & Electron LevelDB `.log` Carver** (`leveldb_log.py`) | Parses 32 KiB physical blocks, verifies masked Castagnoli CRC32C (`0xA282EAD8`), reassembles cross-block `FULL`/`FIRST`/`MIDDLE`/`LAST` WriteBatch frames, and extracts UTF-8 & Blink UTF-16LE JSON records across Chromium browsers and Electron desktop apps (`chatsvc` for Microsoft Teams/Skype, Slack, WhatsApp Web/Desktop, Discord, and B2B invoice portals via `--schema auto\|chatsvc\|generic-json`). | *Does not decompress Snappy `.ldb` SSTables or decode non-JSON Blink `StructuredClone` primitives (roadmap: `v0.4`).* |
 | **Exported Message & Portal JSON Triage** (`triage-json`) | Enumerates soft-deleted (`deletetime` / `deleted_ts` / `is_deleted`) and edited (`edittime` / `edited.ts`) JSON records across messaging & portal exports, extracting validated IOCs strictly per record. | *Cannot quantify records already compacted or evicted prior to acquisition.* |
 | **Financial Checksum Validation** (`ioc_validators.py`) | Validates payment cards via ISO/IEC 7812 **Luhn**, IBANs via all 89 SWIFT IBAN Registry country lengths (15–34 chars) + **Mod-97**, SWIFT/BICs via all **249 ISO 3166-1 alpha-2 country codes + `XK`** (`250` total codes) + stopword filtering, and pairs UK Sort Codes within a 120-char intra-message window. | *Does not bundle proprietary Pay.UK Vocalink sort-code modulus weight tables.* |
 | **RFC 2083 PNG & ISO 10918 JPEG Container Inspection** (`image_containers.py`) | Enforces PNG `IHDR` + `IDAT` + `IEND` completeness and per-chunk CRC32, bounded-decompresses `iCCP` chunks (`acsp`), and reassembles multi-chunk JPEG `APP2` `ICC_PROFILE` + `APP13` (`8BIM`) segments through `SOS`/`EOI` (`0xFFD9`). | *Emits neutral container observations + benign screenshot/OS-resave caveats; never declares standalone "proof of forgery".* |
@@ -77,6 +68,24 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -W error tests/fuzz_parsers.py --
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 benchmark/benchmark_suite.py
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 scripts/verify_cross_tool_forensics.py
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -m starshield.cli demo
+```
+
+### Sample Deterministic Output (`starshield demo`, Default Masked Mode)
+
+```json
+{
+  "epistemic_tier": "OBSERVED",
+  "schema_detected": "chatsvc",
+  "leveldb_batch_byte_offset": 397,
+  "leveldb_sequence_number": 1002,
+  "is_soft_deleted_in_ui": true,
+  "sender_mri": "[REDACTED_HMAC:1b71a34908e1]",
+  "cached_content": "[REDACTED_CONTENT — pass --unredacted to view]",
+  "extracted_iocs": {
+    "luhn_validated_cards": ["[REDACTED_HMAC:3ec5f5677098]"],
+    "mod97_validated_ibans": ["[REDACTED_HMAC:4dad6b1cc0be]", "[REDACTED_HMAC:f21864d3e75c]"]
+  }
+}
 ```
 
 ### CLI Subcommands (`starshield [--unredacted] [--max-mb 64] [--hmac-digest {sha256,sha384,blake2b}] [--hmac-key-file PATH] <subcommand>`)
@@ -127,6 +136,13 @@ python3 scripts/generate_spdx_sbom.py --verify
 ---
 
 ## Governance, Method Validation & Security Reporting
+
+| Verification / Archival Dimension | Live Status & Permanent Identifier |
+| :--- | :--- |
+| **Continuous Fuzzing (`ClusterFuzzLite / Atheris`)** | [![Fuzzing: 10/10](https://img.shields.io/badge/Scorecard%20Fuzzing-10%2F10%20%28ClusterFuzzLite%29-brightgreen)](https://github.com/Ziqi/starshield-forensics/actions/workflows/cflite.yml) [![Continuous Fuzzing](https://github.com/Ziqi/starshield-forensics/actions/workflows/cflite.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/cflite.yml) |
+| **Static Security (`CodeQL SAST`) & Deterministic CI** | [![CodeQL SAST](https://github.com/Ziqi/starshield-forensics/actions/workflows/codeql.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/codeql.yml) [![StarShield Deterministic CI](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/actions/workflows/ci.yml) |
+| **Supply-Chain Provenance & Licensing (`REUSE 3.3`)** | [![Supply-Chain Attestations](https://github.com/Ziqi/starshield-forensics/actions/workflows/attestations.yml/badge.svg)](https://github.com/Ziqi/starshield-forensics/attestations) [![REUSE status](https://img.shields.io/badge/REUSE-3.3%20compliant-brightgreen)](./REUSE.toml) |
+| **Packaging (`Homebrew Tap`) & Scholarly / UNESCO Archival** | [![Homebrew Tap](https://img.shields.io/badge/Homebrew-Ziqi%2Ftap-FBB040.svg?logo=homebrew&logoColor=white)](https://github.com/Ziqi/homebrew-tap) [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24145804.svg)](https://doi.org/10.5281/zenodo.24145804) [![SWHID](https://img.shields.io/badge/SWHID-swh%3A1%3Asnp%3A4ed5efec-e20026)](https://archive.softwareheritage.org/swh:1:snp:4ed5efecab5e40975e75a5c5107b63121b1df60a;origin=https://github.com/Ziqi/starshield-forensics) |
 
 - **Dual-Tool Forensic Method Validation (UK FSR Statutory Code `FSA – DIG 100` [superseding `FSR-C-107`] & `ISO/IEC 17025` Clause 7.2.2 Aligned):** [`VALIDATION_REPORT_FSR_ISO17025.md`](./VALIDATION_REPORT_FSR_ISO17025.md) (`482` test vectors cross-validated against Google `dfindexeddb 20260210` & `Pillow 13.0.0`; open-source validation aid for accredited laboratories, not a claim of laboratory accreditation)
 - **OpenSSF Security Insights (v2.0.0), OSPS Baseline Level 3 (EU CRA Aligned) & REUSE 3.3:** [`SECURITY-INSIGHTS.yml`](./SECURITY-INSIGHTS.yml) · [`SECURITY.md §5`](./SECURITY.md#5-openssf-osps-baseline-level-3--eu-cyber-resilience-act-cra-alignment) · [`REUSE.toml`](./REUSE.toml) · **SWHID (`v0.3.7`):** [`swh:1:rel:3fa912215b0bb2510f7a2cfdfbd51293e29980c4`](https://archive.softwareheritage.org/swh:1:rel:3fa912215b0bb2510f7a2cfdfbd51293e29980c4;origin=https://github.com/Ziqi/starshield-forensics)

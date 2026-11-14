@@ -26,7 +26,7 @@ jobs:
           python-version: "3.12"
       - name: Validate OpenSSF SECURITY-INSIGHTS.yml & SPDX 2.3 SBOM Determinism
         run: |
-          python -m pip install --upgrade pip pyyaml
+          python -m pip install --no-cache-dir --require-hashes -r .github/requirements-ci.txt
           python -c "import yaml; d=yaml.safe_load(open('SECURITY-INSIGHTS.yml')); assert d['header']['schema-version']=='2.0.0' and d['repository']['no-third-party-packages'] is True"
           python scripts/build_reproducible.py --verify --output /tmp/starshield.pyz
           python scripts/generate_spdx_sbom.py --verify --verify-pyz /tmp/starshield.pyz --output /tmp/starshield-forensics-0.3.7.spdx.json
@@ -45,8 +45,8 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install build, coverage, lint & static security tools
-        run: python -m pip install --upgrade pip "setuptools>=77" wheel coverage ruff bandit
+      - name: Install hash-pinned build, coverage, lint & static security tools
+        run: python -m pip install --no-cache-dir --require-hashes -r .github/requirements-ci.txt
       - name: Enforce coding standards (Ruff) & static vulnerability scan (Bandit)
         run: |
           ruff check starshield tests benchmark scripts
@@ -66,8 +66,8 @@ jobs:
           python -c "import json; d=json.load(open('/tmp/pyz_demo.json')); assert d['engine_1_raw_leveldb_wal_carver']['corrupted_frames_count'] == 0"
       - name: Build wheel and verify installed CLI entrypoint outside repo tree
         run: |
-          python -m pip wheel . --no-deps -w dist/
-          python -m pip install dist/*.whl
+          python -m pip wheel . --no-deps --no-build-isolation -w dist/
+          python -m pip install --no-deps dist/*.whl
           cd /tmp && starshield demo > /tmp/demo_out.json
           python -c "import json; d=json.load(open('/tmp/demo_out.json')); assert d['engine_1_raw_leveldb_wal_carver']['corrupted_frames_count'] == 0"
           mkdir -p /tmp/precheck_smoke && starshield precheck /tmp/precheck_smoke > /tmp/pre_out.json
