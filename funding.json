@@ -16,7 +16,7 @@
     {
       "guid": "starshield-forensics",
       "name": "starshield-forensics",
-      "description": "Clean-room, offline, zero-dependency Python digital forensics and pre-action evidence triage toolkit v0.3.7 (OpenSSF Best Practices Silver #16602 [226%], OpenSSF Scorecard 7.9/10 [Fuzzing 10/10 via ClusterFuzzLite/Atheris], SLSA Build Level 3, PyPI PEP 740, UK FSR Statutory Code FSA – DIG 100 / ISO 17025, CERN/Zenodo DOI 10.5281/zenodo.24145804 / 10.5281/zenodo.24156262). Carves uncompacted Chromium IndexedDB/LevelDB write-ahead logs with masked Castagnoli CRC32C verification, inspects PNG/JPEG ICC containers, validates ISO-7812/ISO-13616/ISO-9362 payment identifiers, and enforces keyed pseudonymization with zero network or LLM attack surface.",
+      "description": "Clean-room, offline, zero-dependency Python digital forensics and pre-action evidence triage toolkit v0.3.7 (OpenSSF Best Practices Silver #16602 [226%], OpenSSF OSPS Baseline Level 3 [EU CRA], OpenSSF Scorecard 8.0/10 [Fuzzing 10/10 via ClusterFuzzLite/Atheris, Pinned-Dependencies 9/10], SLSA Build Level 3, PyPI PEP 740, UK FSR Statutory Code FSA – DIG 100 / ISO 17025, CERN/Zenodo DOI 10.5281/zenodo.24145804 / 10.5281/zenodo.24156262, UNESCO SWHID swh:1:snp:4ed5efecab5e40975e75a5c5107b63121b1df60a). Carves uncompacted Chromium & Electron IndexedDB/LevelDB write-ahead logs with masked Castagnoli CRC32C verification, inspects PNG/JPEG ICC containers, validates ISO-7812/ISO-13616/ISO-9362 payment identifiers, and enforces keyed pseudonymization with zero network or LLM attack surface.",
       "webpageUrl": {
         "url": "https://ziqi.github.io/starshield/",
         "wellKnown": "https://ziqi.github.io/starshield/.well-known/funding-manifest-urls"

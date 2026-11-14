@@ -120,7 +120,7 @@ repository:
         - name: OpenSSF Security Scorecard
           evidence: https://securityscorecards.dev/viewer/?uri=github.com/Ziqi/starshield-forensics
           date: '2026-11-14'
-          comment: Continuous supply-chain security audit published via OIDC workflow (7.9/10 overall; 11 checks at 10/10 including Fuzzing, SAST, Packaging, Token-Permissions, Binary-Artifacts, Dangerous-Workflow, Dependency-Update-Tool, Security-Policy, Vulnerabilities, CI-Tests, and License).
+          comment: Continuous supply-chain security audit published via OIDC workflow (8.0/10 overall; Pinned-Dependencies 9/10 and 11 checks at 10/10 including Fuzzing, SAST, Packaging, Token-Permissions, Binary-Artifacts, Dangerous-Workflow, Dependency-Update-Tool, Security-Policy, Vulnerabilities, CI-Tests, and License).
     champions:
       - name: Ziqi Xiao
         email: 2196305+Ziqi@users.noreply.github.com

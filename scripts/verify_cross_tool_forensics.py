@@ -6,7 +6,7 @@
 Dual-Tool & Independent Reference Cross-Validation Harness (`verify_cross_tool_forensics.py`).
 
 Structured in alignment with:
-  - UK Forensic Science Regulator (FSR) Code of Practice (`FSR-C-100` / `FSR-C-107`)
+  - UK Forensic Science Regulator (FSR) Statutory Code of Practice (`FSA – DIG 100`, superseding `FSR-C-100` / `FSR-C-107`)
   - ISO/IEC 17025:2017 Clause 7.2.2 (Validation of Methods)
   - NIST SP 800-86 / SWGDE Digital Forensics Tool Testing Guidelines
 
@@ -900,15 +900,15 @@ def main(argv: List[str] | None = None) -> int:
     summary: Dict[str, Any] = {
         "validation_schema": "starshield-cross-tool-validation/v1",
         "alignment_frameworks": [
-            "UK Forensic Science Regulator Code of Practice (FSR-C-100 / FSR-C-107)",
+            "UK Forensic Science Regulator Statutory Code of Practice (FSA – DIG 100, superseding FSR-C-100 / FSR-C-107)",
             "ISO/IEC 17025:2017 Clause 7.2.2 (Validation of Methods)",
             "SWGDE / NIST SP 800-86 Digital Forensics Tool Testing",
         ],
         "accreditation_disclaimer": (
-            "Self-contained open-source tool validation summary structured in alignment with UK FSR Code "
-            "of Practice (FSR-C-107) and ISO/IEC 17025 Clause 7.2.2 to assist accredited forensic "
-            "laboratories and instructing solicitors in their local validation workflows - not a claim "
-            "of laboratory accreditation."
+            "Self-contained open-source tool validation summary structured in alignment with UK FSR Statutory "
+            "Code of Practice (FSA – DIG 100, superseding FSR-C-107) and ISO/IEC 17025 Clause 7.2.2 to assist "
+            "accredited forensic laboratories and instructing solicitors in their local validation workflows - "
+            "not a claim of laboratory accreditation."
         ),
         "subject_tool": {
             "name": "starshield-forensics",
