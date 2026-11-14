@@ -14,12 +14,12 @@ import json
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RELEASE_VERSION = "0.3.7"
-CREATED_UTC = "2026-11-12T00:00:00Z"
+RELEASE_VERSION = "0.3.8"
+CREATED_UTC = "2026-11-14T00:00:00Z"
 
-PINNED_PYZ_SHA256 = "e6603ef083b20a5460bf56818f63a3a94b856deb377a5b6330be2394e0e21232"
-PINNED_WHEEL_SHA256 = "4ffe6454c4ec78d3485326a4ac763ce1abaa1205009b057d07f69ad99dc37730"
-PINNED_SDIST_SHA256 = "2dd56e823d46fd41d570ee6281d98db120ad64e64b55950827ef57c186e40edd"
+PINNED_PYZ_SHA256 = "394f8e0208aae3e87751c8dd8e6c820ea13c5d896b62e39315c24018ad573c99"
+PINNED_WHEEL_SHA256 = "6f1e045be023b7acd4b3e6f4bf4e4cfce392639bb8b88f1e351369daf13ed817"
+PINNED_SDIST_SHA256 = "87afc0617eedd5a760a5ddfb7ab5ba002dc930ff25db7ad7cd2d8bd115e19325"
 
 
 def build_spdx_document() -> dict[str, object]:
@@ -41,7 +41,7 @@ def build_spdx_document() -> dict[str, object]:
             ],
             "licenseListVersion": "3.25",
             "comment": (
-                "Deterministic SPDX 2.3 SBOM for starshield-forensics v0.3.7 "
+                "Deterministic SPDX 2.3 SBOM for starshield-forensics v0.3.8 "
                 "(Python >=3.10 standard library only; zero external runtime dependencies)."
             ),
         },

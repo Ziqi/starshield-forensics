@@ -509,8 +509,8 @@ def build_synthetic_leveldb_wal_bytes() -> bytes:
     return part1 + part2
 
 
-def run_demo(redact: bool = True) -> int:
-    run_salt = secrets.token_bytes(32)
+def build_demo_report(redact: bool = True, salt: bytes | None = None) -> Dict[str, Any]:
+    run_salt = salt if salt is not None else secrets.token_bytes(32)
     try:
         sample_json_bytes = (
             importlib.resources.files("starshield.data")
@@ -532,7 +532,7 @@ def run_demo(redact: bool = True) -> int:
     )
     valid_jpeg = build_valid_jpeg_with_icc_and_8bim("Display P3", "APPL", split_icc_chunks=2)
 
-    report = {
+    return {
         "toolkit": f"starshield-forensics v{__version__} (Deterministic Chromium Cache & Container Provenance Toolkit)",
         "author": "Ziqi Xiao (@Ziqi)",
         "dataset_notice": "100% CLEAN-ROOM SPECIFICATION TEST VECTORS (2025 UK SUPPLIER INVOICE SCENARIO — TLP:CLEAR)",
@@ -556,6 +556,10 @@ def run_demo(redact: bool = True) -> int:
         ),
         "engine_5_descriptive_linguistics": summarize_corpus_linguistics(payload),
     }
+
+
+def run_demo(redact: bool = True) -> int:
+    report = build_demo_report(redact=redact)
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0
 
@@ -630,6 +634,11 @@ def main(argv: List[str] | None = None) -> int:
 
     p_dur = sub.add_parser("summarize-linguistics", help="Compute descriptive utterance length & punctuation statistics")
     p_dur.add_argument("json_file", type=Path, help="Path to chat transcript JSON")
+
+    sub.add_parser(
+        "mcp",
+        help="Run deterministic read-only Model Context Protocol (MCP) JSON-RPC 2.0 server over stdio",
+    )
 
     args = parser.parse_args(argv)
     redact = not args.unredacted
@@ -718,6 +727,15 @@ def main(argv: List[str] | None = None) -> int:
             }
             print(json.dumps(out, indent=2, ensure_ascii=False))
             return 0
+
+        if args.command == "mcp":
+            from starshield.mcp_server import run_mcp_stdio_server
+
+            return run_mcp_stdio_server(
+                redact=redact,
+                max_mb=args.max_mb,
+                salt=run_salt,
+            )
     except (OSError, ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
         if redact:
             if isinstance(exc, UnicodeDecodeError):

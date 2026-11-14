@@ -29,7 +29,7 @@ jobs:
           python -m pip install --no-cache-dir --require-hashes -r .github/requirements-ci.txt
           python -c "import yaml; d=yaml.safe_load(open('SECURITY-INSIGHTS.yml')); assert d['header']['schema-version']=='2.0.0' and d['repository']['no-third-party-packages'] is True"
           python scripts/build_reproducible.py --verify --output /tmp/starshield.pyz
-          python scripts/generate_spdx_sbom.py --verify --verify-pyz /tmp/starshield.pyz --output /tmp/starshield-forensics-0.3.7.spdx.json
+          python scripts/generate_spdx_sbom.py --verify --verify-pyz /tmp/starshield.pyz --output /tmp/starshield-forensics-0.3.8.spdx.json
 
   test-and-package:
     runs-on: ubuntu-latest
@@ -72,3 +72,5 @@ jobs:
           python -c "import json; d=json.load(open('/tmp/demo_out.json')); assert d['engine_1_raw_leveldb_wal_carver']['corrupted_frames_count'] == 0"
           mkdir -p /tmp/precheck_smoke && starshield precheck /tmp/precheck_smoke > /tmp/pre_out.json
           python -c "import json; p=json.load(open('/tmp/pre_out.json')); assert p['precheck_manifest']['feasibility_verdict'] == 'NO_GO_COMPACTED_OR_UNSUPPORTED'"
+          printf '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n' | starshield mcp > /tmp/mcp_out.json
+          python -c "import json; m=json.load(open('/tmp/mcp_out.json')); assert len(m['result']['tools']) == 4"

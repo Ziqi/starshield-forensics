@@ -86,12 +86,12 @@ repository:
       url: https://github.com/Ziqi/starshield-forensics/blob/main/LICENSE
       expression: MIT
     distribution-points:
-      - uri: https://github.com/Ziqi/starshield-forensics/releases/tag/v0.3.7
-        comment: Official GitHub Release v0.3.7 with signed zipapp, wheel, sdist, SPDX 2.3 SBOM, and SLSA L3 provenance.
-      - uri: pkg:pypi/starshield-forensics@0.3.7
+      - uri: https://github.com/Ziqi/starshield-forensics/releases/tag/v0.3.8
+        comment: Official GitHub Release v0.3.8 with signed zipapp, wheel, sdist, SPDX 2.3 SBOM, and SLSA L3 provenance.
+      - uri: pkg:pypi/starshield-forensics@0.3.8
         comment: Python package identifier (stdlib-only runtime).
-      - uri: https://doi.org/10.5281/zenodo.24156262
-        comment: Permanent CERN Zenodo archival record for v0.3.7 (Concept DOI 10.5281/zenodo.24145804).
+      - uri: https://doi.org/10.5281/zenodo.24145804
+        comment: "Permanent CERN Zenodo Concept DOI auto-resolving to the latest signed release (v0.3.7 DOI 10.5281/zenodo.24156262)."
     attestations:
       - name: GitHub OIDC Sigstore Build Provenance & SBOM Attestations
         predicate-uri: https://slsa.dev/provenance/v1
@@ -99,11 +99,11 @@ repository:
         comment: Sigstore Fulcio X.509 and Rekor transparency log attestations verifiable via gh attestation verify.
       - name: SLSA Build Level 3 Isolated Provenance
         predicate-uri: https://slsa.dev/provenance/v0.2
-        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.3.7/multiple.intoto.jsonl
+        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.3.8/multiple.intoto.jsonl
         comment: Non-forgeable SLSA v1.0 Level 3 provenance generated via slsa-framework/slsa-github-generator.
       - name: Release SPDX 2.3 SBOM
         predicate-uri: https://spdx.dev/Document/v2.3
-        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.3.7/starshield-forensics-0.3.7.spdx.json
+        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.3.8/starshield-forensics-0.3.8.spdx.json
         comment: Deterministic ISO/IEC 5962:2021 SPDX 2.3 JSON Software Bill of Materials.
   security:
     assessments:

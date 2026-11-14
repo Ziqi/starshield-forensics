@@ -1,6 +1,6 @@
 # Security Assurance Case, Architecture & 12-Month Roadmap
 
-> **Structured Software Assurance Case (aligned with NIST IR 7608)** for `starshield-forensics` (`v0.3.7`).
+> **Structured Software Assurance Case (aligned with NIST IR 7608)** for `starshield-forensics` (`v0.3.8`).
 
 ---
 
