@@ -3,38 +3,38 @@ SPDX-FileCopyrightText: 2026 Ziqi Xiao (@Ziqi)
 SPDX-License-Identifier: MIT
 -->
 
-# Cross-Tool & Specification Reference Validation Summary (`starshield-forensics v0.3.9`)
+# Cross-Tool & Specification Reference Validation Summary (`starshield-forensics v0.3.10`)
 
 > [!IMPORTANT]
 > **Scope & Non-Accreditation Notice**: Open-source technical cross-validation summary documenting reproducible execution of `scripts/verify_cross_tool_forensics.py` (`538` vectors) against external open-source reference libraries (Google `dfindexeddb` and `Pillow`, when installed in an isolated QA virtual environment via `--require-external`) and published format specifications. **This document is an engineering verification record, NOT a claim of laboratory accreditation, regulatory compliance, or certification.** Note: Historical URL path `VALIDATION_REPORT_FSR_ISO17025.md` is retained solely to prevent broken external links from prior archival records; this file is excluded from the PyPI `sdist` (`MANIFEST.in`).
 
 ---
 
-## 1. Technical Scope (`v0.3.9`)
+## 1. Technical Scope (`v0.3.10`)
 
-`starshield-forensics` (`v0.3.9`) is a deterministic, zero-dependency, offline Python standard-library command-line toolkit for read-only pre-screening of:
-1. **Uncompacted Chromium & Electron LevelDB Write-Ahead Logs (`.log`)**: Frame-level recovery of `WriteBatch` records across 32,768-byte physical blocks (`FULL`, `FIRST`, `MIDDLE`, `LAST`) with Castagnoli CRC32C (`polynomial 0x82F63B78`, LevelDB `mask delta 0xA282EAD8`) verification and UTF-8 / Blink UTF-16LE JSON extraction.
-2. **PNG (`RFC 2083`) & JPEG (`ISO/IEC 10918-1`) Binary Containers**: Chunk-level IEEE 802.3 CRC-32 validation, bounded `zlib` decompression (`<= 16 MiB`, `MAX_ICC_DECOMPRESSED_BYTES`) of `iCCP` profiles, multi-segment JPEG `APP2` (`ICC_PROFILE`) reassembly, `ISO 15076-1` (`acsp`) 128-byte header parsing, and `APP13` (`Photoshop 3.0\x008BIM`) resource block observation without substring false positives.
+`starshield-forensics` (`v0.3.10`) is a deterministic, zero-dependency, offline Python standard-library command-line toolkit for read-only pre-screening of:
+1. **Uncompacted Chromium & Electron LevelDB Write-Ahead Logs (`.log`)**: Frame-level recovery of `WriteBatch` records across 32,768-byte physical blocks (`FULL`, `FIRST`, `MIDDLE`, `LAST`) with Castagnoli CRC32C (`polynomial 0x82F63B78`, LevelDB `mask delta 0xA282EAD8`) verification, per-operation internal sequence progression, and UTF-8 / Blink UTF-16LE JSON extraction.
+2. **PNG (`RFC 2083`), JPEG (`ISO/IEC 10918-1`) & PDF (`ISO 32000-1`) Binary Containers**: Chunk-level IEEE 802.3 CRC-32 validation, bounded `zlib` decompression (`<= 16 MiB` single-chunk / `<= 32 MiB` cumulative per-file budget) of `iCCP` profiles, multi-segment JPEG `APP2` (`ICC_PROFILE`) reassembly, `ISO 15076-1` (`acsp`) 128-byte header parsing, `APP13` (`Photoshop 3.0\x008BIM`) resource block observation, and structural PDF trailer `%%EOF` counting (skipping stream spans and string literals) without substring false positives.
 3. **Identifier Check-Digit & Registry Syntax**: `ISO/IEC 7812` Luhn card check-digit verification, `ISO 13616` IBAN length and `ISO/IEC 7064` Mod 97-10 check-digit verification across all 89 registered SWIFT jurisdictions, and `ISO 9362` SWIFT/BIC country-code (`250` codes) and context verification. Check-digit verification confirms mathematical syntax only—it does NOT indicate fraud or prove that a payment occurred.
 
 ### Explicit Non-Goals & Epistemic Boundaries
-- **Not a Compacted `.ldb` SSTable Decompressor**: `v0.3.9` does not decompress Snappy `.ldb` SSTables, follow external `.blob` directories, decode non-JSON Blink `StructuredClone` primitives, or parse newly created Chrome 156+ SQLite IndexedDB stores. `starshield precheck` emits `NO_GO_COMPACTED_OR_UNSUPPORTED` when zero carvable `.log` JSON records exist.
+- **Not a Compacted `.ldb` SSTable Decompressor**: `v0.3.10` does not decompress Snappy `.ldb` SSTables, follow external `.blob` directories, decode non-JSON Blink `StructuredClone` primitives, or parse newly created Chrome 156+ SQLite IndexedDB stores. `starshield precheck` emits `NO_GO_COMPACTED_OR_UNSUPPORTED` when zero carvable `.log` JSON records exist, and emits `PARTIAL` rather than `GO` whenever any `.ldb`/`.sst` or `.blob` file is present.
 - **Not an Image or PDF Forgery Detector**: Container `iCCP`, `APP13`/`8BIM`, and PDF `%%EOF`/`xref` observations are structural container checks accompanied by mandatory benign `alternative_explanations`.
 - **Standalone vs. External Dual-Tool Execution**: When `dfindexeddb` or `Pillow` is not installed, `scripts/verify_cross_tool_forensics.py` explicitly reports `STANDALONE SELF-CHECK ONLY` (`external_concordance_measured: false`) and never claims external concordance.
 
 ---
 
-## 2. Test Environment & Release Provenance (`v0.3.9`)
+## 2. Test Environment & Release Provenance (`v0.3.10`)
 
 | Parameter | Verified Value |
 | :--- | :--- |
-| **Subject Tool & Version** | `starshield-forensics v0.3.9` (`0` third-party runtime dependencies) |
+| **Subject Tool & Version** | `starshield-forensics v0.3.10` (`0` third-party runtime dependencies) |
 | **Validation Harness** | [`scripts/verify_cross_tool_forensics.py`](scripts/verify_cross_tool_forensics.py) (`starshield-cross-tool-validation/v1`) |
-| **Deterministic Zipapp (`starshield.pyz`)** | `fd739ec2ec9f9dcc908cf0bed72797393e7389372267f25b75f2461d75893200` |
-| **Python Wheel (`starshield_forensics-0.3.9-py3-none-any.whl`)** | `b214aa6ced469ba1624f5d5fc1055b45be87cfdc35da5d690e48fd2d25ed4e72` |
-| **Source Tarball (`starshield_forensics-0.3.9.tar.gz`)** | `a8323a79c4a22bc4f5835423b1c0559164a073c4876345753c15a2de80caa127` |
-| **SPDX 2.3 Software Bill of Materials** | `starshield-forensics-0.3.9.spdx.json` (`55d74cd6490ad35d9085130ceb0be09e61f25d06d1c9259cc22a2abc1c64729b`) |
-| **Zenodo Concept DOI** | [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) (Historical `v0.3.7` record: `10.5281/zenodo.24156262`) |
+| **Deterministic Zipapp (`starshield.pyz`)** | `c2ab9034d9e5aaeff4a2f16250261dff58d49233edcfeb91ab799d7898e6f3e0` |
+| **Python Wheel (`starshield_forensics-0.3.10-py3-none-any.whl`)** | `7cf0e868e3fa362d24397f9db11c23c7a1ab8dccba580c43217d75bb74c14741` |
+| **Source Tarball (`starshield_forensics-0.3.10.tar.gz`)** | `0649e2b746670c7609ea4ec51a0aeb6c9f0979eae513303b5e7a3cce17068195` |
+| **SPDX 2.3 Software Bill of Materials** | `starshield-forensics-0.3.10.spdx.json` (`50def436c4c6aa897662a692a9ecd49b92c6ebd772100dd7fa8b38ec60c72e99`) |
+| **Zenodo Concept DOI** | [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) *(currently resolves to archived `v0.3.7`: `10.5281/zenodo.24156262`)* |
 | **Reference Python Runtime** | CPython `3.12.13` (`Darwin-arm64` QA venv) + Ubuntu GitHub Actions CI matrix (`3.10`, `3.11`, `3.12`, `3.13`) |
 | **External Comparator 1 (LevelDB WAL)** | Google [`dfindexeddb`](https://github.com/google/dfindexeddb) `20260210` (`Apache-2.0`, `dfindexeddb.leveldb.log.FileReader`, isolated QA venv via `--require-external`) |
 | **External Comparator 2 (PNG / JPEG / ICC)** | [`Pillow`](https://python-pillow.org/) `13.0.0` (`PIL.Image`, isolated QA venv via `--require-external`) |
@@ -44,7 +44,7 @@ SPDX-License-Identifier: MIT
 
 ## 3. Cross-Tool & Specification Matrix (`538` Total Vectors: `6 + 6 + 526`)
 
-When executed with `--require-external` (`dfindexeddb==20260210` and `Pillow==13.0.0` installed in an isolated QA venv), `starshield-forensics v0.3.9` passes all **`538` deterministic vectors** (`6` LevelDB WAL vectors, `6` PNG/JPEG container vectors, and `526` check-digit/registry vectors).
+When executed with `--require-external` (`dfindexeddb==20260210` and `Pillow==13.0.0` installed in an isolated QA venv), `starshield-forensics v0.3.10` passes all **`538` deterministic vectors** (`6` LevelDB WAL vectors, `6` PNG/JPEG container vectors, and `526` check-digit/registry vectors).
 
 ### 3.1 Suite 1: Chromium LevelDB `.log` WAL Carving vs. Google `dfindexeddb` (`20260210`, `6` Vectors)
 
@@ -76,7 +76,7 @@ When executed with `--require-external` (`dfindexeddb==20260210` and `Pillow==13
 | :--- | :--- | ---: | :--- | :--- | :---: |
 | **`S3-V01`** | `ISO/IEC 7812` Card Luhn (`13`–`19` digits, single-digit & transposition errors, `extract_validated_iocs` separation) | `12` | `5` valid / `7` invalid | Independent `GF(10)` table-lookup Luhn | **PASS (`12 / 12`)** |
 | **`S3-V02`** | `ISO 13616` / SWIFT IBAN Registry across **all `89` registered jurisdictions** (`15`-char `NO` to `33`-char `RU`) + `ISO/IEC 7064` Mod 97-10 | `184` | `89` valid / `95` invalid (`89` bad check digit + `6` unregistered/length) | Streaming Horner `Mod 97-10` evaluator | **PASS (`184 / 184`)** |
-| **`S3-V03`** | `ISO 9362` SWIFT/BIC across **all `250` `ISO 3166-1` alpha-2 (`+ XK`) codes** + `74` English 8-letter stopwords + banking-context gate | `330` | `251` valid / `79` invalid (`4` bad country + `74` stopwords + `1` no-context) | Exhaustive `ISO 3166-1` + context matrix | **PASS (`330 / 330`)** |
+| **`S3-V03`** | `ISO 9362` SWIFT/BIC across **all `250` `ISO 3166-1` alpha-2 / `XK` territory codes** + `74` English 8-letter stopwords + banking-context gate | `330` | `251` valid / `79` invalid (`4` bad country + `74` stopwords + `1` no-context) | Exhaustive `ISO 3166-1` + context matrix | **PASS (`330 / 330`)** |
 
 ---
 

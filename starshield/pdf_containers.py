@@ -73,6 +73,7 @@ _ESC_MAP = {
 
 _PDF_HEADER_RE = re.compile(rb"%PDF-(\d+\.\d+)")
 _XREF_STREAM_RE = re.compile(rb"/Type[\x00\t\n\x0c\r ]*/XRef\b")
+_STRUCT_EOF_TOKEN_RE = re.compile(rb"\\.|<<|>>|[()%<>]", re.DOTALL)
 
 # C-compiled linear scanners eliminating unbounded dual find(b"\n")+find(b"\r") scans and slice copies
 _EOL_RE = re.compile(rb"[\r\n]")
@@ -1427,72 +1428,190 @@ def _scan_xmp_packets(
     return packets, False
 
 
+def _build_non_stream_windows(n: int, skip_spans: List[tuple[int, int]] | None) -> List[tuple[int, int]]:
+    """Build sorted, disjoint `[lo, hi)` byte intervals outside `skip_spans`."""
+    if not skip_spans:
+        return [(0, n)] if n > 0 else []
+    windows: List[tuple[int, int]] = []
+    cur = 0
+    for s_lo, s_hi in sorted(skip_spans):
+        lo = max(cur, min(n, s_lo))
+        hi = max(lo, min(n, s_hi))
+        if cur < lo:
+            windows.append((cur, lo))
+        cur = max(cur, hi)
+    if cur < n:
+        windows.append((cur, n))
+    return windows
+
+
+def _scan_structural_eof_offsets(
+    raw: bytes,
+    raw_stream_spans: List[tuple[int, int]],
+    note_marker_cap: Callable[[int], None] | None = None,
+    add_error: Callable[[int | None, str], None] | None = None,
+) -> tuple[List[int], int, int]:
+    """
+    Single-pass O(N) lexical scanner for structural PDF trailer `%%EOF` markers.
+
+    Skips all `raw_stream_spans`, balanced literal strings `(...)` (honoring `\\` escapes),
+    hexadecimal strings `<...>` (distinguished from `<<` / `>>` dictionary delimiters), and
+    mid-line `%` comments so embedded stream data or string literals never inflate
+    `incremental_revision_count`.
+    """
+    eof_offsets: List[int] = []
+    total_eof_count = 0
+    last_eof_offset = -1
+    n = len(raw)
+
+    for win_lo, win_hi in _build_non_stream_windows(n, raw_stream_spans):
+        pos = win_lo
+        paren_depth = 0
+        open_paren_offset = win_lo
+        while pos < win_hi:
+            m = _STRUCT_EOF_TOKEN_RE.search(raw, pos, win_hi)
+            if m is None:
+                break
+            idx = m.start()
+            tok = m.group(0)
+
+            if paren_depth > 0:
+                if tok.startswith(b"\\"):
+                    pos = m.end()
+                elif tok == b"(":
+                    paren_depth += 1
+                    pos = idx + 1
+                elif tok == b")":
+                    paren_depth -= 1
+                    pos = idx + 1
+                else:
+                    pos = m.end()
+                continue
+
+            if tok == b"(":
+                paren_depth = 1
+                open_paren_offset = idx
+                pos = idx + 1
+                continue
+            if tok in (b"<<", b">>"):
+                pos = idx + 2
+                continue
+            if tok == b"<":
+                if idx + 1 < win_hi and raw[idx + 1] in _HEX_OR_WS_BYTES:
+                    nm = _NON_HEX_WS_RE.search(raw, idx + 1, win_hi)
+                    if nm is None:
+                        pos = win_hi
+                    elif raw[nm.start()] == 0x3E:
+                        pos = nm.start() + 1
+                    else:
+                        pos = nm.start()
+                elif idx + 1 < win_hi and raw[idx + 1] == 0x3E:
+                    pos = idx + 2
+                else:
+                    pos = idx + 1
+                continue
+            if tok in (b")", b">") or tok.startswith(b"\\"):
+                pos = m.end()
+                continue
+
+            # tok == b"%": distinguish `%PDF-x.y`, structural trailer `%%EOF`, and ordinary `%` comments
+            if raw[idx : idx + 5] == b"%PDF-":
+                pos = min(win_hi, idx + 8)
+                continue
+            if (
+                raw[idx : idx + 5] == b"%%EOF"
+                and (idx == 0 or raw[idx - 1] in _PDF_WS_BYTES or raw[idx - 1] in b")>]}")
+                and (idx + 5 >= n or raw[idx + 5] in _PDF_WS_BYTES)
+            ):
+                total_eof_count += 1
+                last_eof_offset = idx
+                if len(eof_offsets) < MAX_CONTAINER_MARKERS:
+                    eof_offsets.append(idx)
+                elif note_marker_cap is not None:
+                    note_marker_cap(idx)
+                pos = min(win_hi, idx + 5)
+                continue
+
+            eol_m = _EOL_RE.search(raw, idx + 1, win_hi)
+            pos = eol_m.end() if eol_m is not None else win_hi
+
+        if paren_depth > 0 and add_error is not None:
+            add_error(
+                open_paren_offset,
+                "Unterminated PDF literal string '(' encountered during structural trailer scan",
+            )
+
+    return eof_offsets, total_eof_count, last_eof_offset
+
+
 def _scan_startxref_offsets(
     raw: bytes,
     add_error: Callable[[int | None, str], None],
     note_marker_cap: Callable[[int], None],
+    skip_spans: List[tuple[int, int]] | None = None,
 ) -> List[Dict[str, Any]]:
     """
-    Linear O(N) scanner for `startxref` pointers with strict <=18-digit integer bounds.
+    Linear O(N) scanner for `startxref` pointers outside `skip_spans` with <=18-digit integer bounds.
 
     Never invokes unbounded `int()` on >4300-digit inputs (`sys.get_int_max_str_digits()`).
     """
     out: List[Dict[str, Any]] = []
     n = len(raw)
-    cursor = 0
 
-    while cursor < n:
-        pos = raw.find(b"startxref", cursor)
-        if pos == -1:
-            break
-        after = pos + 9
-        if pos > 0 and raw[pos - 1] in _ASCII_WORD_BYTES:
-            cursor = after
-            continue
+    for win_lo, win_hi in _build_non_stream_windows(n, skip_spans):
+        cursor = win_lo
+        while cursor < win_hi:
+            pos = raw.find(b"startxref", cursor, win_hi)
+            if pos == -1:
+                break
+            after = pos + 9
+            if pos > 0 and raw[pos - 1] in _ASCII_WORD_BYTES:
+                cursor = after
+                continue
 
-        ws_end = after
-        ws_cap = min(n, after + 64)
-        while ws_end < ws_cap and raw[ws_end] in _PDF_WS_BYTES:
-            ws_end += 1
-        if ws_end == after or ws_end >= n:
-            cursor = after
-            continue
+            ws_end = after
+            ws_cap = min(win_hi, after + 64)
+            while ws_end < ws_cap and raw[ws_end] in _PDF_WS_BYTES:
+                ws_end += 1
+            if ws_end == after or ws_end >= win_hi:
+                cursor = after
+                continue
 
-        p = ws_end
-        sign = 1
-        if raw[p] in (0x2B, 0x2D):
-            if raw[p] == 0x2D:
-                sign = -1
-            p += 1
+            p = ws_end
+            sign = 1
+            if raw[p] in (0x2B, 0x2D):
+                if raw[p] == 0x2D:
+                    sign = -1
+                p += 1
 
-        d_start = p
-        while p < n and 0x30 <= raw[p] <= 0x39:
-            p += 1
-        if p == d_start:
-            cursor = ws_end
-            continue
+            d_start = p
+            while p < win_hi and 0x30 <= raw[p] <= 0x39:
+                p += 1
+            if p == d_start:
+                cursor = ws_end
+                continue
 
-        cursor = p
-        sig_digits = raw[d_start:p].lstrip(b"0")
+            cursor = p
+            sig_digits = raw[d_start:p].lstrip(b"0")
 
-        if len(sig_digits) > MAX_STARTXREF_DIGITS:
+            if len(sig_digits) > MAX_STARTXREF_DIGITS:
+                if len(out) < MAX_CONTAINER_MARKERS:
+                    out.append({"marker_offset": pos, "declared_xref_offset": None})
+                else:
+                    note_marker_cap(pos)
+                add_error(pos, "startxref offset exceeds bounded 64-bit integer range")
+                continue
+
+            decl = sign * (int(sig_digits) if sig_digits else 0)
             if len(out) < MAX_CONTAINER_MARKERS:
-                out.append({"marker_offset": pos, "declared_xref_offset": None})
+                out.append({"marker_offset": pos, "declared_xref_offset": decl})
             else:
                 note_marker_cap(pos)
-            add_error(pos, "startxref offset exceeds bounded 64-bit integer range")
-            continue
 
-        decl = sign * (int(sig_digits) if sig_digits else 0)
-        if len(out) < MAX_CONTAINER_MARKERS:
-            out.append({"marker_offset": pos, "declared_xref_offset": decl})
-        else:
-            note_marker_cap(pos)
-
-        if decl < 0:
-            add_error(pos, "Invalid negative startxref offset (< 0)")
-        elif decl >= n:
-            add_error(pos, "startxref offset points at or past end of PDF container")
+            if decl < 0:
+                add_error(pos, "Invalid negative startxref offset (< 0)")
+            elif decl >= n:
+                add_error(pos, "startxref offset points at or past end of PDF container")
 
     return out
 
@@ -1558,57 +1677,7 @@ def inspect_pdf_container(
                 f"Info value cap reached ({MAX_INFO_VALUES_PER_KEY} distinct values per key); additional values omitted",
             )
 
-    eof_offsets: List[int] = []
-    total_eof_count = 0
-    last_eof_offset = -1
-    eof_cur = 0
     n = len(raw)
-    while eof_cur < n:
-        epos = raw.find(b"%%EOF", eof_cur)
-        if epos == -1:
-            break
-        total_eof_count += 1
-        last_eof_offset = epos
-        if len(eof_offsets) < MAX_CONTAINER_MARKERS:
-            eof_offsets.append(epos)
-        else:
-            note_marker_cap(epos)
-        eof_cur = epos + 5
-
-    if total_eof_count == 0:
-        add_error(n, "Missing terminal %%EOF marker")
-
-    startxref_offsets = _scan_startxref_offsets(raw, add_error, note_marker_cap)
-
-    xref_offsets: List[int] = []
-    xref_cur = 0
-    while xref_cur < n:
-        xpos = raw.find(b"xref", xref_cur)
-        if xpos == -1:
-            break
-        if (xpos == 0 or raw[xpos - 1] in (0x0A, 0x0D)) and (
-            xpos + 4 < n and raw[xpos + 4] in _PDF_WS_BYTES
-        ):
-            if len(xref_offsets) < MAX_CONTAINER_MARKERS:
-                xref_offsets.append(xpos)
-            else:
-                note_marker_cap(xpos)
-                break
-        xref_cur = xpos + 4
-
-    xref_stream_offsets: List[int] = []
-    for m in _XREF_STREAM_RE.finditer(raw):
-        if len(xref_stream_offsets) < MAX_CONTAINER_MARKERS:
-            xref_stream_offsets.append(m.start())
-        else:
-            note_marker_cap(m.start())
-            break
-
-    trailing_bytes = 0
-    if last_eof_offset != -1:
-        last_eof_end = last_eof_offset + 5
-        rest = raw[last_eof_end:].lstrip(b"\r\n\x00 ")
-        trailing_bytes = len(rest)
 
     xmp_packets, xmp_capped = _scan_xmp_packets(
         raw,
@@ -1979,7 +2048,68 @@ def inspect_pdf_container(
         if b"/" in dec_bytes or (not xmp_capped and b"<?xpacket" in dec_bytes):
             inspect_decoded_stream_payload(dec_bytes, pos, from_compressed=True)
 
-    # Stage 2: Lexical scan of non-stream PDF syntax in `raw`, then merge decoded stream Info & risk counts
+    # Stage 2: Structural trailer/xref marker scan (skipping raw_stream_spans & strings) + lexical scan
+    eof_offsets, total_eof_count, last_eof_offset = _scan_structural_eof_offsets(
+        raw,
+        raw_stream_spans,
+        note_marker_cap=note_marker_cap,
+        add_error=add_error,
+    )
+    if total_eof_count == 0:
+        add_error(n, "Missing terminal %%EOF marker")
+
+    startxref_offsets = _scan_startxref_offsets(
+        raw,
+        add_error,
+        note_marker_cap,
+        skip_spans=raw_stream_spans,
+    )
+    if len(startxref_offsets) > total_eof_count and not markers_capped:
+        add_error(
+            startxref_offsets[-1]["marker_offset"],
+            f"Structural trailer mismatch: observed {len(startxref_offsets)} startxref markers vs {total_eof_count} %%EOF markers",
+        )
+
+    xref_offsets: List[int] = []
+    xref_cap_hit = False
+    for win_lo, win_hi in _build_non_stream_windows(n, raw_stream_spans):
+        xref_cur = win_lo
+        while xref_cur < win_hi:
+            xpos = raw.find(b"xref", xref_cur, win_hi)
+            if xpos == -1:
+                break
+            if (xpos == 0 or raw[xpos - 1] in (0x0A, 0x0D)) and (
+                xpos + 4 < n and raw[xpos + 4] in _PDF_WS_BYTES
+            ):
+                if len(xref_offsets) < MAX_CONTAINER_MARKERS:
+                    xref_offsets.append(xpos)
+                else:
+                    note_marker_cap(xpos)
+                    xref_cap_hit = True
+                    break
+            xref_cur = xpos + 4
+        if xref_cap_hit:
+            break
+
+    xref_stream_offsets: List[int] = []
+    xref_stm_cap_hit = False
+    for win_lo, win_hi in _build_non_stream_windows(n, raw_stream_spans):
+        for m in _XREF_STREAM_RE.finditer(raw, win_lo, win_hi):
+            if len(xref_stream_offsets) < MAX_CONTAINER_MARKERS:
+                xref_stream_offsets.append(m.start())
+            else:
+                note_marker_cap(m.start())
+                xref_stm_cap_hit = True
+                break
+        if xref_stm_cap_hit:
+            break
+
+    trailing_bytes = 0
+    if last_eof_offset != -1:
+        last_eof_end = last_eof_offset + 5
+        rest = raw[last_eof_end:].lstrip(b"\r\n\x00 ")
+        trailing_bytes = len(rest)
+
     info_metadata: Dict[str, List[str]] = {}
     info_seen: Dict[str, set[str]] = {}
     risk_counts: Dict[str, int] = {}

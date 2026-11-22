@@ -1,7 +1,7 @@
-# `StarShield-Bench-24` (`v1.0.0` · Paired with `starshield-forensics v0.3.9`)
+# `StarShield-Bench-24` (`v1.0.0` · Paired with `starshield-forensics v0.3.10`)
 
 > **24-Case Deterministic Offline Endpoint Triage & Parser Resilience Suite**  
-> **Author:** Ziqi Xiao (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) · **License:** MIT · **Classification:** `TLP:CLEAR (100% Synthetic)`
+> **Author:** Ziqi Xiao (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) *(currently resolves to archived `v0.3.7`)* · **License:** MIT · **Classification:** `TLP:CLEAR (100% Synthetic)`
 
 ---
 
@@ -39,6 +39,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 benchmark/benchmark_suite.py --output-dir ./ar
 
 ## 3. Zenodo Archival & Citation (`10.5281/zenodo.24145804`)
 
-- **Concept DOI (Resolves to Latest Archived Release):** [`https://doi.org/10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804)
+- **Concept DOI (Currently Resolves to Archived `v0.3.7`):** [`https://doi.org/10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804)
 - **Historical Prior-Release DOIs:** `v0.3.7` [`10.5281/zenodo.24156262`](https://doi.org/10.5281/zenodo.24156262) · `v0.3.6` [`10.5281/zenodo.24151431`](https://doi.org/10.5281/zenodo.24151431)
 - **Machine-Readable Citation:** [`../CITATION.cff`](../CITATION.cff)

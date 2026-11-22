@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Release tag to attest and attach SLSA L3 provenance to"
         required: false
-        default: "v0.3.9"
+        default: "v0.3.10"
         type: string
   release:
     types: [published]
@@ -40,7 +40,7 @@ jobs:
           EVENT_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          TAG="${EVENT_TAG:-${INPUT_TAG:-v0.3.9}}"
+          TAG="${EVENT_TAG:-${INPUT_TAG:-v0.3.10}}"
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Invalid release tag format: $TAG" >&2
             exit 1
@@ -53,8 +53,8 @@ jobs:
 
           mkdir -p dist /tmp/release-sig
           python scripts/build_reproducible.py --verify --output dist/starshield.pyz
-          if [[ "$TAG" == "v0.3.9" ]]; then
-            echo "fd739ec2ec9f9dcc908cf0bed72797393e7389372267f25b75f2461d75893200  dist/starshield.pyz" | sha256sum -c -
+          if [[ "$TAG" == "v0.3.10" ]]; then
+            echo "c2ab9034d9e5aaeff4a2f16250261dff58d49233edcfeb91ab799d7898e6f3e0  dist/starshield.pyz" | sha256sum -c -
           fi
 
           curl -fsSL -o /tmp/release-sig/SHA256SUMS "${BASE_URL}/SHA256SUMS"
@@ -70,7 +70,14 @@ jobs:
 
           (
             cd dist
-            grep -E "  (starshield\.pyz|${WHL_NAME}|${SDIST_NAME})$" /tmp/release-sig/SHA256SUMS | sha256sum -c -
+            for req_asset in "starshield.pyz" "${WHL_NAME}" "${SDIST_NAME}"; do
+              line="$(awk -v target="$req_asset" 'length($1) == 64 && $1 ~ /^[0-9a-f]+$/ && ($2 == target || $2 == ("*" target)) && NF == 2 { print; exit }' /tmp/release-sig/SHA256SUMS)"
+              if [[ -z "$line" ]]; then
+                echo "Missing required SHA256SUMS entry for ${req_asset}" >&2
+                exit 1
+              fi
+              printf '%s\n' "$line" | sha256sum -c -
+            done
           )
 
           python scripts/generate_spdx_sbom.py \

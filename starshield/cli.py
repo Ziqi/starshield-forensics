@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2026 Ziqi Xiao
 # SPDX-License-Identifier: MIT
 """
-StarShield Forensics CLI v0.3.9 (`starshield`)
+StarShield Forensics CLI v0.3.10 (`starshield`)
 Author: Ziqi Xiao (@Ziqi)
 License: MIT
 
@@ -26,10 +26,8 @@ import hmac
 import html
 import importlib.resources
 import json
-import os
 import re
 import secrets
-import stat
 import statistics
 import sys
 from datetime import datetime, timezone
@@ -57,12 +55,14 @@ from starshield.ioc_validators import (
 )
 from starshield.leveldb_log import (
     VALID_SCHEMA_MODES,
+    SafeDiagnosticError,
     build_writebatch,
     classify_carved_json_object,
     encode_logical_record_across_blocks,
     inspect_chromium_storage_path,
     normalize_carved_record_fields,
     parse_leveldb_wal,
+    read_bounded_bytes,
 )
 from starshield.pdf_containers import (
     apply_pdf_redaction,
@@ -138,14 +138,6 @@ def build_acquisition_manifest(
     }
 
 
-class SafeDiagnosticError(ValueError):
-    """Explicit whitelist ValueError carrying a static, zero-PII diagnostic message safe for masked mode."""
-
-    def __init__(self, safe_message: str) -> None:
-        super().__init__(safe_message)
-        self.safe_message = safe_message
-
-
 def format_masked_error(exc: BaseException) -> str:
     """
     Map runtime exceptions to fixed, zero-PII strings in masked mode (`redact=True`).
@@ -155,6 +147,10 @@ def format_masked_error(exc: BaseException) -> str:
     """
     if isinstance(exc, SafeDiagnosticError):
         return exc.safe_message
+    if isinstance(exc, ValueError) and str(exc) == (
+        "Refusing to shred file: target does not carry a valid starshield-token-vault/v1 header"
+    ):
+        return str(exc)
     if isinstance(exc, RecursionError):
         return "Input exceeded maximum parser nesting depth (path and payload suppressed in masked mode)"
     if isinstance(exc, MemoryError):
@@ -166,72 +162,6 @@ def format_masked_error(exc: BaseException) -> str:
     if isinstance(exc, OSError):
         return "Unable to access or read regular input file (filename and OS path suppressed in masked mode)"
     return "Invalid input value or schema violation (details suppressed in masked mode)"
-
-
-def read_bounded_bytes(path: Path, max_mb: int = MAX_DEFAULT_MB, redact: bool = True) -> bytes:
-    if max_mb < 1:
-        raise SafeDiagnosticError("--max-mb safety limit must be >= 1 MiB")
-    safe_max_mb = int(max_mb)
-    limit = safe_max_mb * 1024 * 1024
-
-    fd: int | None = None
-    try:
-        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-        fd = os.open(path, flags)
-        st = os.fstat(fd)
-    except (OSError, ValueError) as exc:
-        if fd is not None:
-            os.close(fd)
-        if redact:
-            raise OSError(
-                "Unable to access input file (filename and OS path suppressed in masked mode)"
-            ) from None
-        raise exc
-
-    if not stat.S_ISREG(st.st_mode):
-        os.close(fd)
-        if redact:
-            raise OSError(
-                "Input path must be a regular file (filename and OS path suppressed in masked mode)"
-            )
-        raise OSError(f"Input path {path.name} is not a regular file")
-
-    if st.st_size > limit:
-        os.close(fd)
-        if redact:
-            raise SafeDiagnosticError(
-                f"Input file exceeds --max-mb={safe_max_mb} safety limit "
-                "(filename and exact byte length suppressed in masked mode)"
-            )
-        raise ValueError(f"File {path.name} ({st.st_size} bytes) exceeds --max-mb={safe_max_mb} safety limit")
-
-    try:
-        chunks: List[bytes] = []
-        total = 0
-        with os.fdopen(fd, "rb") as fh:
-            while True:
-                want = min(1024 * 1024, (limit + 1) - total)
-                buf = fh.read(want)
-                if not buf:
-                    break
-                chunks.append(buf)
-                total += len(buf)
-                if total > limit:
-                    if redact:
-                        raise SafeDiagnosticError(
-                            f"Input file exceeds --max-mb={safe_max_mb} safety limit "
-                            "(filename and exact byte length suppressed in masked mode)"
-                        )
-                    raise ValueError(
-                        f"File {path.name} ({total}+ bytes) exceeds --max-mb={safe_max_mb} safety limit"
-                    )
-        return b"".join(chunks)
-    except OSError as exc:
-        if redact:
-            raise OSError(
-                "Unable to read input file bytes (filename and OS path suppressed in masked mode)"
-            ) from None
-        raise exc
 
 
 def strip_markup(raw: str) -> str:
@@ -264,7 +194,7 @@ def parse_strict_utc_ts(ts: Any) -> float | None:
         if dt.tzinfo is None:
             return None
         return dt.astimezone(timezone.utc).timestamp()
-    except ValueError:
+    except (ValueError, OverflowError, OSError):
         return None
 
 
@@ -300,7 +230,7 @@ def apply_wal_record_redaction(
                 )
             else:
                 rec["sender_mri"] = mask_identifier(rec["sender_mri"], salt=run_salt)
-                rec["cached_content"] = "[REDACTED_CONTENT — pass --unredacted to view]"
+                rec["cached_content"] = "[REDACTED_CONTENT]"
             rec["composetime"] = redact_timestamp(rec["composetime"])
             rec["deletetime"] = redact_timestamp(rec["deletetime"])
             rec["edittime"] = redact_timestamp(rec["edittime"])
@@ -414,7 +344,7 @@ def triage_exported_chatsvc_json(
             msg_amounts = extract_currency_amounts(body)
         elif redact:
             rendered_sender = mask_identifier(sender, salt=run_salt)
-            rendered_body = "[REDACTED_CONTENT — pass --unredacted to view]"
+            rendered_body = "[REDACTED_CONTENT]"
             msg_amounts = None
         else:
             rendered_sender = sender
@@ -988,6 +918,7 @@ def main(argv: List[str] | None = None) -> int:
         ValueError,
         TypeError,
         KeyError,
+        OverflowError,
         UnicodeDecodeError,
         RecursionError,
         MemoryError,
@@ -1003,6 +934,13 @@ def main(argv: List[str] | None = None) -> int:
             else:
                 lab_msg = str(exc)
             sys.stderr.write(json.dumps({"error": lab_msg, "masked_mode": False}) + "\n")
+        return 2
+    except Exception as exc:
+        if redact:
+            safe_msg = format_masked_error(exc)
+            sys.stderr.write(json.dumps({"error": safe_msg, "masked_mode": True}) + "\n")
+        else:
+            sys.stderr.write(json.dumps({"error": str(exc), "masked_mode": False}) + "\n")
         return 2
     finally:
         set_active_hmac_digest(prev_digest)

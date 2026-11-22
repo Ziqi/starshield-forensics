@@ -1,6 +1,6 @@
-# Security Assurance Case, Architecture & 12-Month Roadmap
+# Security Assurance Case, Architecture & Scope Boundaries
 
-> **Structured Software Assurance Case (structured per NIST IR 7608)** for `starshield-forensics` (`v0.3.9`).
+> **Structured Software Assurance Case (structured per NIST IR 7608)** for `starshield-forensics` (`v0.3.10`).
 
 ---
 
@@ -44,7 +44,7 @@
 
 ### What Users CAN Expect
 - **Zero Network Exfiltration:** No module imports `urllib`, `http`, `socket`, or `ssl` at runtime; execution succeeds inside network-disconnected forensic VMs.
-- **Bounded Memory & Decompression Safety:** Input reads are capped by `--max-mb` (64 MiB default), and compressed PNG `iCCP` chunks use `zlib.decompressobj().decompress(comp_bytes, max_len + 1)` (`MAX_ICC_DECOMPRESSED_BYTES = 16 MiB` / `16_777_216` hard ceiling) to defeat zip/zlib decompression bombs.
+- **Bounded Memory & Decompression Safety:** Input reads are capped by `--max-mb` (64 MiB default), and compressed PNG `iCCP` and PDF `/FlateDecode` streams enforce both a `16 MiB` (`16_777_216`) single-payload ceiling and a `32 MiB` (`33_554_432`) per-file cumulative decompression budget to defeat zip/zlib decompression bombs.
 - **Default Screen/Log Pseudonymization:** Without `--unredacted`, identifiers are keyed via CSPRNG `secrets.token_bytes(32)` HMAC (with configurable digest agility via `--hmac-digest` and external key separation via `--hmac-key-file`), and error paths scrub filenames and raw snippets from `stderr`.
 - **Cryptographic Release Authenticity:** Official releases provide `SHA256SUMS` and detached OpenSSH `Ed25519` signatures (`SHA256SUMS.sig`) verifiable offline against `KEYS.pub`.
 
@@ -75,10 +75,10 @@ Forensic inputs (Chromium caches, screenshots, exported chat JSONs) originate fr
 
 1. **Economy of Mechanism:** Zero external runtime packages (`dependencies = []`), eliminating transitive PyPI supply-chain surface.
 2. **Fail-Safe Defaults:** Masked HMAC pseudonymization is ON by default; `--max-mb=64` is enforced by default; malformed WAL frames increment `corrupted_frames_count` without crashing or executing dynamic code.
-3. **Complete Mediation:** Every file read passes through `read_bounded_bytes()`; every PNG chunk and LevelDB physical record header checks remaining slice length before slicing or unpacking.
+3. **Complete Mediation:** Every file read across CLI subcommands, MCP tools, and directory `precheck` passes through `read_bounded_bytes()` (`O_RDONLY | O_NONBLOCK | O_NOFOLLOW`); every PNG chunk, PDF stream, and LevelDB physical record header checks remaining slice length before slicing or unpacking.
 4. **Open Design:** Security relies on standard algorithms (`HMAC-SHA256/SHA384/BLAKE2b`, `Ed25519` release signatures) rather than obscurity; all source and test vectors are MIT-licensed.
 5. **Separation of Privilege / Least Privilege:** Runs strictly as an unprivileged user process requiring read-only file access; release signing keys are air-gapped from CI runners.
-6. **Least Common Mechanism:** Each CLI invocation is stateless with fresh CSPRNG keys (`secrets.token_bytes(32)`) and zero shared daemons or temp-file caches.
+6. **Least Common Mechanism:** Default Mode A CLI invocations run entirely in-memory with fresh per-run CSPRNG keys (`secrets.token_bytes(32)`) and zero background daemons. Only when `--vault-file` is explicitly passed for Mode B reversible detokenization is an OS `0600` (`O_NOFOLLOW`) local JSON lookup table persisted to the caller-specified path.
 
 ---
 
@@ -87,7 +87,7 @@ Forensic inputs (Chromium caches, screenshots, exported chat JSONs) originate fr
 | Weakness Class | CWE ID | Countermeasure & Verification Evidence |
 | :--- | :--- | :--- |
 | Arbitrary Code Execution / Deserialization | CWE-502 / CWE-94 | Never calls `eval`, `exec`, `pickle`, `marshal`, `yaml.load`, or `subprocess(..., shell=True)`. Verified via `Bandit` CI scan (`0` issues). |
-| Uncontrolled Resource Consumption / Zip Bomb | CWE-400 / CWE-409 | `--max-mb` pre-read stat gate + `zlib.decompressobj().decompress(comp_bytes, 16_777_216 + 1)` (`MAX_ICC_DECOMPRESSED_BYTES = 16 MiB`) + bounded varint loop (`shift <= 63`). Verified in `tests/test_adversarial.py`. |
+| Uncontrolled Resource Consumption / Zip Bomb | CWE-400 / CWE-409 | `--max-mb` pre-read + streaming `read_bounded_bytes()` gate, `16 MiB` single-chunk / `32 MiB` cumulative `zlib` budgets (`MAX_ICC_DECOMPRESSED_BYTES`, `MAX_TOTAL_ICC_DECOMPRESSED_BYTES`, `MAX_TOTAL_DECOMPRESSED_BYTES`), `4,096`-file `precheck` walk cap, and bounded varint loop (`shift <= 63`). |
 | Out-of-Bounds Read / Truncated Frame Handling | CWE-125 | Explicit `offset + length > len(data)` allowlist checks across LevelDB 7-byte headers, PNG 12-byte chunk frames, and JPEG segment lengths. |
 | Improper Input Validation | CWE-20 | Strict allowlists on `--schema` (`auto`, `chatsvc`, `generic-json`), `--hmac-digest` (`sha256`, `sha384`, `blake2b`), ISO-3166 alpha-2 (`250` codes), and ISO-13616 IBAN lengths (`89` countries). |
 | Use of Broken Crypto / Hardcoded Keys | CWE-327 / CWE-798 | Uses CSPRNG `secrets.token_bytes(32)` + `HMAC-SHA256` (with `--hmac-digest` agility and `--hmac-key-file` external key storage); zero MD5/SHA-1. |
@@ -105,13 +105,11 @@ Forensic inputs (Chromium caches, screenshots, exported chat JSONs) originate fr
 
 ---
 
-## 7. 12-Month Technical Roadmap & Explicit Non-Goals (`documentation_roadmap`)
+## 7. Architectural Format Boundaries & Explicit Non-Goals (`documentation_roadmap`)
 
-### Planned Milestones (2026 Q4 – 2027 Q4)
-- **Q1 2027 (`v0.4.0`):** Pure-Python zero-dependency Snappy raw-block decompressor, SSTable `index`/`restart` block reader, and `CURRENT`/`MANIFEST` `VersionEdit` replay for `.ldb` LevelDB SSTable read-only inspection (flagging external `.blob` references explicitly).
-- **Q2 2027 (`v0.5.0`):** Separate read-only SQLite B-Tree / `-wal` / Freelist inspection milestone for newly created Chrome 156+ SQLite-backed IndexedDB stores.
-- **Q3 2027 (`v0.6.0`):** Deterministic Blink V8 `StructuredClone` and IndexedDB binary key (`IDBKey`) wire-format decoder for non-JSON IndexedDB stores.
-- **Q4 2027 (`v1.0.0`):** Stable 1.0 schema specification, external third-party security review, and `CASE/UCO` JSON-LD / `Timesketch JSONL` timeline export helpers.
+### Current Format & Evidentiary Boundaries (`v0.3.10`)
+- **Uncompacted LevelDB `.log` Scope:** Parses 32 KiB physical blocks and `WriteBatch` frames in uncompacted `.log` write-ahead logs; does **not** decompress Snappy-compressed `.ldb` SSTables, follow external `.blob` directories, decode non-JSON binary Blink V8 `StructuredClone` payloads, or inspect SQLite B-Tree / `-wal` stores (such as newly created Chrome 156+ IndexedDB stores).
+- **Container Structure Observation Only:** PNG, JPEG, and PDF container inspectors report deterministic structural markers (`CRC32`, `ICC_PROFILE`, structural trailer `%%EOF`, `/Info`, XMP) alongside benign explanations; they never claim pixel forgery or tamper authentication.
 
 ### Explicit Non-Goals (What the Project Intends NOT to Do)
 - **No Cloud SaaS or Telemetry:** Will never upload evidence artifacts to remote servers or embed analytics.

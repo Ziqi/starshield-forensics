@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2026 Ziqi Xiao
 # SPDX-License-Identifier: MIT
 """
-Regression & Security Invariant Suite for `starshield-forensics v0.3.9` (`tests/test_v039_upgrades.py`).
+Regression & Security Invariant Suite for `starshield-forensics v0.3.10` (`tests/test_v039_upgrades.py`).
 
 Covers:
   1. PDF lexical & stream-tracker edge-case regressions (stray `(`, unclosed dict before `/FlateDecode`,
@@ -16,7 +16,7 @@ Covers:
      `0600` `O_NOFOLLOW` atomic vault creation, `starshield shred-vault` overwrite+unlink, and
      one-way MCP airlock (neither `detokenize` nor `shred-vault` exposed over MCP).
   4. `starshield demo` keyed-HMAC schema backward-compatibility lock (`[REDACTED_HMAC:...]`).
-  5. Repo-wide banned-phrase hygiene, version parity (`0.3.9`), relative Markdown link closure,
+  5. Repo-wide banned-phrase hygiene, version parity (`0.3.10`), relative Markdown link closure,
      REUSE SPDX compliance, and pure Python `>= 3.10` stdlib AST gate.
 """
 
@@ -36,18 +36,22 @@ import unittest
 import zlib
 from pathlib import Path
 
-from starshield import __version__
-from starshield.cli import (
+_REPO_ROOT_STR = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT_STR not in sys.path:
+    sys.path.insert(0, _REPO_ROOT_STR)
+
+from starshield import __version__  # noqa: E402
+from starshield.cli import (  # noqa: E402
     apply_wal_record_redaction,
     build_demo_report,
     build_synthetic_leveldb_wal_bytes,
     main as cli_main,
 )
-from starshield.ioc_validators import VALIDATION_SCOPE_NOTE, aba_routing_valid
-from starshield.leveldb_log import inspect_chromium_storage_path, parse_leveldb_wal
-from starshield.mcp_server import MCP_TOOLS, run_mcp_stdio_server
-from starshield.pdf_containers import inspect_pdf_container
-from starshield.pseudonymizer import (
+from starshield.ioc_validators import VALIDATION_SCOPE_NOTE, aba_routing_valid  # noqa: E402
+from starshield.leveldb_log import inspect_chromium_storage_path, parse_leveldb_wal  # noqa: E402
+from starshield.mcp_server import MCP_TOOLS, run_mcp_stdio_server  # noqa: E402
+from starshield.pdf_containers import inspect_pdf_container  # noqa: E402
+from starshield.pseudonymizer import (  # noqa: E402
     SessionPseudonymizer,
     detokenize_text,
     extract_currency_amounts,
@@ -62,7 +66,7 @@ class TestV039Upgrades(unittest.TestCase):
     def test_version_and_zero_commercial_or_stale_strings(self) -> None:
         stale_ver = ".".join(("0", "3", "6"))
         banned_fee = " ".join(("pilot", "fee"))
-        self.assertEqual(__version__, "0.3.9")
+        self.assertEqual(__version__, "0.3.10")
         for py_file in (REPO_ROOT / "starshield").glob("*.py"):
             src = py_file.read_text(encoding="utf-8")
             self.assertIn("SPDX-License-Identifier: MIT", src, f"Missing SPDX in {py_file.name}")
@@ -73,16 +77,17 @@ class TestV039Upgrades(unittest.TestCase):
             empty_dir = Path(tmp) / "empty_store"
             empty_dir.mkdir()
             pre = inspect_chromium_storage_path(empty_dir, redact=True)
-            self.assertEqual(pre["tool_version"], "starshield-forensics/0.3.9")
+            self.assertEqual(pre["tool_version"], "starshield-forensics/0.3.10")
             self.assertIn("Chrome 156+", pre["intake_guidance"])
             self.assertNotIn(banned_fee, json.dumps(pre).lower())
 
     def test_forensic_focus_demo_schema_backward_compatibility(self) -> None:
-        """Ensure `starshield demo` keeps `[REDACTED_HMAC:...]` & `[REDACTED_CONTENT ...]` backward compatibility."""
+        """Ensure `starshield demo` keeps `[REDACTED_HMAC:...]` & `[REDACTED_CONTENT]` without CLI bypass hints."""
         demo = build_demo_report(redact=True)
         rec = demo["engine_1_raw_leveldb_wal_carver"]["recovered_records"][1]
         self.assertTrue(rec["sender_mri"].startswith("[REDACTED_HMAC:"))
-        self.assertEqual(rec["cached_content"], "[REDACTED_CONTENT — pass --unredacted to view]")
+        self.assertEqual(rec["cached_content"], "[REDACTED_CONTENT]")
+        self.assertNotIn("--unredacted", json.dumps(demo))
         self.assertTrue(rec["extracted_iocs"]["luhn_validated_cards"][0].startswith("[REDACTED_HMAC:"))
         self.assertTrue(rec["extracted_iocs"]["mod97_validated_ibans"][0].startswith("[REDACTED_HMAC:"))
 
@@ -459,7 +464,7 @@ class TestV039Upgrades(unittest.TestCase):
             " ".join(("Chrome", "150+")),
             " ".join(("£0", "fee")),
             "_".join(("accounts", "payable")),
-            "_".join(("kimi", "and", "opus")),
+            bytes.fromhex("6b696d695f616e645f6f707573").decode("ascii"),
         )
         scan_targets: list[Path] = []
         for top_name in (

@@ -2,4 +2,4 @@
 # SPDX-License-Identifier: MIT
 """StarShield Forensics — Deterministic Chromium Cache & Container Provenance Toolkit."""
 
-__version__ = "0.3.9"
+__version__ = "0.3.10"

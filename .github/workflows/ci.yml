@@ -28,8 +28,17 @@ jobs:
         run: |
           python -m pip install --no-cache-dir --require-hashes -r .github/requirements-ci.txt
           python -c "import yaml; d=yaml.safe_load(open('SECURITY-INSIGHTS.yml')); assert d['header']['schema-version']=='2.0.0' and d['repository']['no-third-party-packages'] is True"
-          python scripts/build_reproducible.py --verify --output /tmp/starshield.pyz
-          python scripts/generate_spdx_sbom.py --verify --verify-pyz /tmp/starshield.pyz --output /tmp/starshield-forensics-0.3.9.spdx.json
+          mkdir -p /tmp/ci-dists
+          python scripts/build_reproducible.py --verify --output /tmp/ci-dists/starshield.pyz
+          python -c "import setuptools.build_meta as bm; bm.build_wheel('/tmp/ci-dists'); bm.build_sdist('/tmp/ci-dists')"
+          python scripts/generate_spdx_sbom.py \
+            --verify \
+            --verify-pyz /tmp/ci-dists/starshield.pyz \
+            --wheel /tmp/ci-dists/starshield_forensics-0.3.10-py3-none-any.whl \
+            --sdist /tmp/ci-dists/starshield_forensics-0.3.10.tar.gz \
+            --require-dists \
+            --output /tmp/ci-dists/starshield-forensics-0.3.10.spdx.json
+          python -c "import json; d=json.load(open('/tmp/ci-dists/starshield-forensics-0.3.10.spdx.json')); assert len(d['packages']) == 3 and all(len(p.get('checksums', [])) == 1 for p in d['packages'])"
 
   test-and-package:
     runs-on: ubuntu-latest
@@ -53,12 +62,12 @@ jobs:
           bandit -q -r starshield scripts
       - name: Run unit & adversarial tests under strict warnings + >=80% statement coverage gate
         run: |
-          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error -m coverage run -m unittest discover -s tests -v
+          PYTHONDONTWRITEBYTECODE=1 python -W error -m coverage run -m unittest discover -s tests -v
           python -m coverage report --include="starshield/*" --fail-under=80
       - name: Run StarShield-Bench-24 deterministic benchmark & cross-tool validation harness
         run: |
-          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error benchmark/benchmark_suite.py
-          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error scripts/verify_cross_tool_forensics.py
+          PYTHONDONTWRITEBYTECODE=1 python -W error benchmark/benchmark_suite.py
+          PYTHONDONTWRITEBYTECODE=1 python -W error scripts/verify_cross_tool_forensics.py
       - name: Verify bit-for-bit reproducible zipapp build
         run: |
           python scripts/build_reproducible.py --verify --output dist/starshield.pyz

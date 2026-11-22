@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import struct
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -40,7 +42,91 @@ from starshield import __version__
 BLOCK_SIZE = 32768
 HEADER_SIZE = 7
 MAX_LOGICAL_RECORD_BYTES = 32 * 1024 * 1024  # 32 MiB anti-DoS cap per reassembled batch
+MAX_PRECHECK_SCAN_FILES = 4096  # Bounded directory walk cap for precheck
 LEVELDB_SSTABLE_MAGIC_LE = struct.pack("<Q", 0xDB4775248B80FB57)
+
+
+class SafeDiagnosticError(ValueError):
+    """Explicit whitelist ValueError carrying a static, zero-PII diagnostic message safe for masked mode."""
+
+    def __init__(self, safe_message: str) -> None:
+        super().__init__(safe_message)
+        self.safe_message = safe_message
+
+
+def read_bounded_bytes(
+    path: Path,
+    max_mb: int = 64,
+    redact: bool = True,
+    *,
+    nofollow: bool = True,
+) -> bytes:
+    """Read a regular file strictly within `max_mb` MiB using O_RDONLY | O_NONBLOCK | O_NOFOLLOW."""
+    if max_mb < 1:
+        raise SafeDiagnosticError("--max-mb safety limit must be >= 1 MiB")
+    safe_max_mb = int(max_mb)
+    limit = safe_max_mb * 1024 * 1024
+
+    fd: int | None = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+        if nofollow:
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        st = os.fstat(fd)
+    except (OSError, ValueError) as exc:
+        if fd is not None:
+            os.close(fd)
+        if redact:
+            raise OSError(
+                "Unable to access input file (filename and OS path suppressed in masked mode)"
+            ) from None
+        raise exc
+
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        if redact:
+            raise OSError(
+                "Input path must be a regular file (filename and OS path suppressed in masked mode)"
+            )
+        raise OSError(f"Input path {path.name} is not a regular file")
+
+    if st.st_size > limit:
+        os.close(fd)
+        if redact:
+            raise SafeDiagnosticError(
+                f"Input file exceeds --max-mb={safe_max_mb} safety limit "
+                "(filename and exact byte length suppressed in masked mode)"
+            )
+        raise ValueError(f"File {path.name} ({st.st_size} bytes) exceeds --max-mb={safe_max_mb} safety limit")
+
+    try:
+        chunks: List[bytes] = []
+        total = 0
+        with os.fdopen(fd, "rb") as fh:
+            while True:
+                want = min(1024 * 1024, (limit + 1) - total)
+                buf = fh.read(want)
+                if not buf:
+                    break
+                chunks.append(buf)
+                total += len(buf)
+                if total > limit:
+                    if redact:
+                        raise SafeDiagnosticError(
+                            f"Input file exceeds --max-mb={safe_max_mb} safety limit "
+                            "(filename and exact byte length suppressed in masked mode)"
+                        )
+                    raise ValueError(
+                        f"File {path.name} ({total}+ bytes) exceeds --max-mb={safe_max_mb} safety limit"
+                    )
+        return b"".join(chunks)
+    except OSError as exc:
+        if redact:
+            raise OSError(
+                "Unable to read input file bytes (filename and OS path suppressed in masked mode)"
+            ) from None
+        raise exc
 
 REC_ZERO = 0
 REC_FULL = 1
@@ -207,16 +293,53 @@ def build_writebatch(sequence: int, operations: List[Tuple[int, bytes, bytes]]) 
     return bytes(body)
 
 
-def _is_valid_chatsvc_message_obj(obj: Any) -> bool:
-    """Ensure carved JSON object is a top-level chatsvc message record, not a non-chatsvc messenger or inner sub-dict."""
+_CHATSVC_SIGNATURE_KEYS = frozenset(
+    {
+        "composetime",
+        "messagetype",
+        "conversationid",
+        "imdisplayname",
+        "clientmessageid",
+        "originalarrivaltime",
+        "amsreferences",
+    }
+)
+_B2B_INVOICE_EXCLUSIVE_KEYS = frozenset(
+    {
+        "invoice_id",
+        "payment_id",
+        "beneficiary_iban",
+        "iban",
+        "sort_code",
+        "account_number",
+        "beneficiary",
+        "payee",
+        "vendor",
+        "supplier",
+        "payment_instructions",
+        "amount",
+    }
+)
+
+
+def _is_valid_chatsvc_message_obj(obj: Any, *, allow_generic_id_content: bool = False) -> bool:
+    """Ensure carved JSON object is a top-level chatsvc message record, not a B2B invoice, Slack/Web messenger, or inner sub-dict."""
     if not isinstance(obj, dict):
         return False
     msg_id = obj.get("id")
     if msg_id is None or str(msg_id).strip() == "":
         return False
-    if any(k in obj for k in ("content", "composetime", "messagetype", "conversationid")):
+    lower_keys = {str(k).lower() for k in obj.keys()}
+    if lower_keys & _CHATSVC_SIGNATURE_KEYS:
         return True
-    if "from" in obj and not any(k in obj for k in ("body", "text", "t", "ts")):
+    props = obj.get("properties")
+    if isinstance(props, dict) and any(k in props for k in ("deletetime", "edittime", "emotions", "links")):
+        return True
+    if "from" in obj and not (
+        lower_keys & ({"body", "text", "t", "ts"} | _B2B_INVOICE_EXCLUSIVE_KEYS)
+    ):
+        return True
+    if allow_generic_id_content and "content" in obj and not (lower_keys & _B2B_INVOICE_EXCLUSIVE_KEYS):
         return True
     return False
 
@@ -231,7 +354,7 @@ def classify_carved_json_object(obj: Any, schema_mode: str = "auto") -> str | No
     if not isinstance(obj, dict) or not obj:
         return None
 
-    if _is_valid_chatsvc_message_obj(obj):
+    if _is_valid_chatsvc_message_obj(obj, allow_generic_id_content=(schema_mode == "chatsvc")):
         return "chatsvc"
 
     if schema_mode == "chatsvc":
@@ -245,13 +368,17 @@ def classify_carved_json_object(obj: Any, schema_mode: str = "auto") -> str | No
     ):
         return "slack_web"
 
+    # Explicit B2B supplier, ERP, or banking invoice/payment portal shape when financial keys are present
+    if (lower_keys & set(_PORTAL_ID_KEYS)) and (lower_keys & _B2B_INVOICE_EXCLUSIVE_KEYS):
+        return "b2b_portal_json"
+
     # WhatsApp Web / Signal / Generic Web Messenger shape
     if (lower_keys & {"id", "msg_id", "t", "timestamp"}) and (
         lower_keys & {"body", "text", "message", "author", "from", "sender", "ack"}
     ):
         return "web_messenger"
 
-    # B2B supplier, ERP, or banking invoice/payment portal shape
+    # B2B supplier, ERP, or banking invoice/payment portal fallback shape (e.g. id + content/memo/note)
     if (lower_keys & set(_PORTAL_ID_KEYS)) and (lower_keys & set(_PORTAL_CONTENT_KEYS)):
         return "b2b_portal_json"
 
@@ -579,7 +706,7 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
         "corrupted_frames_count": len(corrupted_records),
         "corrupted_frames": corrupted_records,
         "recovered_records_count": len(recovered_entries),
-        "recovered_chatsvc_records_count": chatsvc_count if schema_mode == "chatsvc" else len(recovered_entries),
+        "recovered_chatsvc_records_count": chatsvc_count,
         "recovered_records": recovered_entries,
     }
 
@@ -634,7 +761,8 @@ def _decode_writebatch_into(
                             "epistemic_tier": "OBSERVED",
                             "schema_detected": schema_tag,
                             "leveldb_batch_byte_offset": logical_offset,
-                            "leveldb_sequence_number": seq_num,
+                            "leveldb_batch_sequence_number": seq_num,
+                            "leveldb_sequence_number": seq_num + parsed_ops,
                             "key_sha256": hashlib.sha256(key_bytes).hexdigest(),
                             "value_sha256": hashlib.sha256(val_bytes).hexdigest(),
                             "message_id": norm["message_id"],
@@ -674,16 +802,22 @@ def _decode_writebatch_into(
 
 
 def _has_leveldb_sstable_magic(path: Path) -> bool:
-    """Verify the 8-byte LevelDB SSTable footer magic (`0xdb4775248b80fb57`) at `EOF - 8`."""
+    """Verify the 8-byte LevelDB SSTable footer magic (`0xdb4775248b80fb57`) at `EOF - 8` via O_NOFOLLOW."""
+    fd = -1
     try:
-        size = path.stat().st_size
-        if size < 48:
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(path), flags)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size < 48:
             return False
-        with path.open("rb") as fh:
-            fh.seek(size - 8)
-            return fh.read(8) == LEVELDB_SSTABLE_MAGIC_LE
+        os.lseek(fd, st.st_size - 8, os.SEEK_SET)
+        tail = os.read(fd, 8)
+        return tail == LEVELDB_SSTABLE_MAGIC_LE
     except OSError:
         return False
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def inspect_chromium_storage_path(
@@ -698,34 +832,61 @@ def inspect_chromium_storage_path(
     Never emits plaintext message content, filenames, or raw hashes in default masked mode.
     """
     if max_mb < 1:
-        raise ValueError("--max-mb safety limit must be >= 1 MiB")
-    if not target.exists():
+        raise SafeDiagnosticError("--max-mb safety limit must be >= 1 MiB")
+    try:
+        target_st = os.lstat(target)
+    except OSError as exc:
         if redact:
-            raise OSError("Unable to access target path (OS path suppressed in masked mode)")
-        raise FileNotFoundError(f"Target path does not exist: {target}")
+            raise OSError("Unable to access target path (OS path suppressed in masked mode)") from None
+        raise FileNotFoundError(f"Target path does not exist: {target}") from exc
 
-    limit_bytes = max_mb * 1024 * 1024
+    if stat.S_ISLNK(target_st.st_mode):
+        if redact:
+            raise OSError("Refusing symbolic-link target path (OS path suppressed in masked mode)")
+        raise OSError(f"Target path is a symbolic link: {target}")
+
     log_files: List[Path] = []
     ldb_files: List[Path] = []
     blob_files_count = 0
+    scanned_files = 0
+    scan_truncated = False
 
-    if target.is_file():
+    if stat.S_ISREG(target_st.st_mode):
         suf = target.suffix.lower()
         if suf == ".log":
             log_files.append(target)
         elif suf in (".ldb", ".sst"):
             ldb_files.append(target)
-    elif target.is_dir():
-        for p in sorted(target.rglob("*")):
-            if not p.is_file():
-                continue
-            suf = p.suffix.lower()
-            if suf == ".log":
-                log_files.append(p)
-            elif suf in (".ldb", ".sst"):
-                ldb_files.append(p)
-            elif ".blob" in str(p.parent).lower() or suf == ".blob":
-                blob_files_count += 1
+    elif stat.S_ISDIR(target_st.st_mode):
+        for dirpath, dirnames, filenames in os.walk(target, followlinks=False):
+            dirnames.sort()
+            filenames.sort()
+            parent_lower = dirpath.lower()
+            for fname in filenames:
+                if scanned_files >= MAX_PRECHECK_SCAN_FILES:
+                    scan_truncated = True
+                    break
+                p = Path(dirpath) / fname
+                try:
+                    pst = os.lstat(p)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(pst.st_mode):
+                    continue
+                scanned_files += 1
+                suf = p.suffix.lower()
+                if suf == ".log":
+                    log_files.append(p)
+                elif suf in (".ldb", ".sst"):
+                    ldb_files.append(p)
+                elif ".blob" in parent_lower or suf == ".blob":
+                    blob_files_count += 1
+            if scan_truncated:
+                break
+    else:
+        if redact:
+            raise OSError("Target path must be a regular file or directory (OS path suppressed in masked mode)")
+        raise OSError(f"Target path is neither a regular file nor a directory: {target}")
 
     valid_wal_frames = 0
     carvable_records = 0
@@ -736,15 +897,15 @@ def inspect_chromium_storage_path(
 
     for lf in log_files:
         try:
-            sz = lf.stat().st_size
-        except OSError:
-            continue
-        if sz > limit_bytes:
+            raw_log = read_bounded_bytes(lf, max_mb=max_mb, redact=redact, nofollow=True)
+        except ValueError:
             oversize_logs_skipped += 1
             continue
-        if sz == 0:
+        except OSError:
             continue
-        parsed = parse_leveldb_wal(lf.read_bytes(), schema_mode=schema_mode)
+        if not raw_log:
+            continue
+        parsed = parse_leveldb_wal(raw_log, schema_mode=schema_mode)
         valid_wal_frames += parsed["valid_physical_frames"]
         carvable_records += parsed["recovered_records_count"]
         v8_binary_only_values += parsed["blink_v8_non_json_values_skipped"]
@@ -756,7 +917,13 @@ def inspect_chromium_storage_path(
 
     verified_sstables = sum(1 for f in ldb_files if _has_leveldb_sstable_magic(f))
 
-    if carvable_records > 0 and verified_sstables == 0 and v8_binary_only_values == 0 and blob_files_count == 0:
+    if (
+        carvable_records > 0
+        and len(ldb_files) == 0
+        and v8_binary_only_values == 0
+        and blob_files_count == 0
+        and not scan_truncated
+    ):
         verdict = "GO"
         guidance = (
             "Uncompacted LevelDB .log frames contain carvable JSON records. "
@@ -766,7 +933,7 @@ def inspect_chromium_storage_path(
         verdict = "PARTIAL"
         guidance = (
             "Carvable JSON records are recoverable from uncompacted .log frames, alongside compacted "
-            f".ldb SSTables, external .blob files, or binary-only Blink V8 values that fall outside v{__version__} scope."
+            f".ldb SSTables, external .blob files, binary-only Blink V8 values, or capped directory scans that fall outside v{__version__} scope."
         )
     else:
         verdict = "NO_GO_COMPACTED_OR_UNSUPPORTED"
@@ -784,6 +951,7 @@ def inspect_chromium_storage_path(
         "target_label": "[REDACTED_TARGET_PATH]" if redact else str(target),
         "schema_mode": schema_mode,
         "feasibility_verdict": verdict,
+        "scan_capped_at_max_files": scan_truncated,
         "wal_log_files_detected": len(log_files),
         "wal_oversize_files_skipped": oversize_logs_skipped,
         "valid_wal_physical_frames": valid_wal_frames,

@@ -25,7 +25,11 @@ import unittest
 import zlib
 from pathlib import Path
 
-from starshield.cli import (
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from starshield.cli import (  # noqa: E402
     apply_image_redaction,
     apply_wal_record_redaction,
     build_acquisition_manifest,
@@ -36,13 +40,13 @@ from starshield.cli import (
     summarize_corpus_linguistics,
     triage_exported_chatsvc_json,
 )
-from starshield.image_containers import (
+from starshield.image_containers import (  # noqa: E402
     PNG_MAGIC,
     build_valid_jpeg_with_icc_and_8bim,
     build_valid_png_with_iccp,
     inspect_image_container,
 )
-from starshield.ioc_validators import (
+from starshield.ioc_validators import (  # noqa: E402
     DEFAULT_EPHEMERAL_SALT,
     aba_routing_valid,
     eth_eip55_checksum_valid,
@@ -56,14 +60,14 @@ from starshield.ioc_validators import (
     mask_identifier,
     tron_trc20_address_valid,
 )
-from starshield.pdf_containers import (
+from starshield.pdf_containers import (  # noqa: E402
     MAX_INFO_VALUES_PER_KEY,
     MAX_XMP_PACKETS,
     apply_pdf_redaction,
     build_synthetic_incremental_pdf,
     inspect_pdf_container,
 )
-from starshield.leveldb_log import (
+from starshield.leveldb_log import (  # noqa: E402
     LEVELDB_SSTABLE_MAGIC_LE,
     REC_FIRST,
     REC_FULL,

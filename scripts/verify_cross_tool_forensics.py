@@ -515,21 +515,14 @@ def run_suite_1_leveldb(has_dfindexeddb: bool) -> Dict[str, Any]:
             )
             ss_ops = [
                 {
-                    "batch_seq": r["leveldb_sequence_number"],
+                    "batch_seq": r["leveldb_batch_sequence_number"],
+                    "internal_key_seq": r["leveldb_sequence_number"],
                     "key_sha256": r["key_sha256"],
                     "value_sha256": r["value_sha256"],
                 }
                 for r in ss["recovered_records"]
             ]
-            ref_batch_ops = [
-                {
-                    "batch_seq": op["batch_seq"],
-                    "key_sha256": op["key_sha256"],
-                    "value_sha256": op["value_sha256"],
-                }
-                for op in ref["value_ops"]
-            ]
-            _require(ss_ops == ref_batch_ops, f"{vec['id']} WriteBatch record digest mismatch vs reference")
+            _require(ss_ops == ref["value_ops"], f"{vec['id']} WriteBatch record digest/sequence mismatch vs reference")
             valid_frames_compared += ref["physical_frames"]
             valid_records_compared += len(ss_ops)
 
@@ -550,18 +543,10 @@ def run_suite_1_leveldb(has_dfindexeddb: bool) -> Dict[str, Any]:
                     df_crcs == ref["physical_crcs"],
                     f"{vec['id']} dfindexeddb header checksum list mismatch",
                 )
-                df_val_ops = []
                 df_internal_ops = []
                 for b in df_batches:
                     for k in b.records:
                         if k.record_type == df_defs.InternalRecordType.VALUE:
-                            df_val_ops.append(
-                                {
-                                    "batch_seq": b.sequence_number,
-                                    "key_sha256": _sha256_hex(k.key),
-                                    "value_sha256": _sha256_hex(k.value),
-                                }
-                            )
                             df_internal_ops.append(
                                 {
                                     "batch_seq": b.sequence_number,
@@ -571,12 +556,12 @@ def run_suite_1_leveldb(has_dfindexeddb: bool) -> Dict[str, Any]:
                                 }
                             )
                 _require(
-                    df_val_ops == ss_ops and df_internal_ops == ref["value_ops"],
+                    df_internal_ops == ss_ops and df_internal_ops == ref["value_ops"],
                     f"{vec['id']} dfindexeddb vs StarShield record SHA-256/sequence mismatch",
                 )
                 entry["dfindexeddb_physical_frames"] = len(df_phys)
                 entry["dfindexeddb_batches"] = len(df_batches)
-                entry["dfindexeddb_value_records"] = len(df_val_ops)
+                entry["dfindexeddb_value_records"] = len(df_internal_ops)
                 entry["dfindexeddb_exact_match"] = True
         else:
             _require(

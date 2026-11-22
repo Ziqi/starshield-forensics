@@ -23,10 +23,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from starshield import __version__ as STARSHIELD_VERSION  # noqa: E402
 
-RELEASE_VERSION = "0.3.9"
+RELEASE_VERSION = "0.3.10"
 CREATED_UTC = "2026-11-22T00:00:00Z"
 
-PINNED_PYZ_SHA256 = "fd739ec2ec9f9dcc908cf0bed72797393e7389372267f25b75f2461d75893200"
+PINNED_PYZ_SHA256 = "c2ab9034d9e5aaeff4a2f16250261dff58d49233edcfeb91ab799d7898e6f3e0"
 
 
 def _sha256_file(path: Path) -> str:
@@ -252,7 +252,8 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(serialized.encode("utf-8"))
     digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-    print(f"SPDX_2_3_OK version={RELEASE_VERSION} sha256={digest} path={args.output}")
+    mode_tag = "pyz+wheel+sdist" if (wheel_sha and sdist_sha) else "pyz-only"
+    print(f"SPDX_2_3_OK version={RELEASE_VERSION} dists={mode_tag} sha256={digest} path={args.output}")
     return 0
 
 

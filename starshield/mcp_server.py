@@ -268,8 +268,8 @@ def _dispatch_tool_call(
             if redact:
                 payload = json.loads(
                     json.dumps(payload, ensure_ascii=False).replace(
-                        "[REDACTED_CONTENT — pass --unredacted to view]",
-                        "[WITHHELD_IN_STRUCTURAL_MCP_MODE — free-form prose withheld by default]",
+                        '"[REDACTED_CONTENT]"',
+                        '"[WITHHELD_IN_STRUCTURAL_MCP_MODE — free-form prose withheld by default]"',
                     )
                 )
         elif tool_name == "starshield_precheck_leveldb":
@@ -413,6 +413,7 @@ def _dispatch_tool_call(
         ValueError,
         TypeError,
         KeyError,
+        OverflowError,
         UnicodeDecodeError,
         RecursionError,
         MemoryError,
@@ -426,6 +427,17 @@ def _dispatch_tool_call(
                 err_msg = "Input exceeded available memory bounds"
             else:
                 err_msg = str(exc)
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps({"error": err_msg, "masked_mode": redact}, ensure_ascii=False),
+                }
+            ],
+            "isError": True,
+        }
+    except Exception as exc:
+        err_msg = format_masked_error(exc) if redact else str(exc)
         return {
             "content": [
                 {
@@ -679,20 +691,43 @@ def run_mcp_stdio_server(
             )
             continue
 
-        response = handle_mcp_message(
-            parsed,
-            redact=redact,
-            max_mb=max_mb,
-            session_salt=session_salt,
-            session_pseudonymizer=session_pseudo,
-        )
+        try:
+            response = handle_mcp_message(
+                parsed,
+                redact=redact,
+                max_mb=max_mb,
+                session_salt=session_salt,
+                session_pseudonymizer=session_pseudo,
+            )
+        except Exception:
+            req_id = parsed.get("id") if isinstance(parsed, dict) else None
+            response = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {
+                    "code": -32603,
+                    "message": "Internal MCP dispatch error (details suppressed in masked mode)",
+                },
+            }
+
+        vault_persist_warning: str | None = None
         if (
             vault_file is not None
             and redact
             and session_pseudo is not None
+            and isinstance(parsed, dict)
+            and parsed.get("method") == "tools/call"
             and sum(session_pseudo.token_counts().values()) > last_saved_total
         ):
-            session_pseudo.save_vault_atomic(vault_file)
-            last_saved_total = sum(session_pseudo.token_counts().values())
+            try:
+                session_pseudo.save_vault_atomic(vault_file)
+                last_saved_total = sum(session_pseudo.token_counts().values())
+            except (OSError, ValueError):
+                vault_persist_warning = (
+                    "Unable to persist local token vault; check --vault-file parent directory and permissions"
+                )
+
         if response is not None:
+            if vault_persist_warning is not None and isinstance(response.get("result"), dict):
+                response["result"]["vault_persist_warning"] = vault_persist_warning
             _write_rpc_frame(writer, response, framing)

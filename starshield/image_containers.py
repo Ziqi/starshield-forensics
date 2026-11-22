@@ -28,16 +28,84 @@ from typing import Any, Dict, List, Tuple
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 JPEG_SOI = b"\xff\xd8"
-MAX_ICC_DECOMPRESSED_BYTES = 16 * 1024 * 1024  # 16 MiB anti-zip-bomb limit
+MAX_ICC_DECOMPRESSED_BYTES = 16 * 1024 * 1024  # 16 MiB single-chunk anti-zip-bomb limit
+MAX_TOTAL_ICC_DECOMPRESSED_BYTES = 32 * 1024 * 1024  # 32 MiB cumulative per-file anti-zip-bomb budget
+DECOMPRESS_STEP_BYTES = 64 * 1024  # 64 KiB incremental inflate step for mid-stream budget accounting
+
+
+def _decompress_bounded_accounted(
+    comp_bytes: bytes,
+    max_len: int = MAX_ICC_DECOMPRESSED_BYTES,
+) -> Tuple[str, int, bytes, str]:
+    """
+    Incrementally inflate a PNG `iCCP` zlib stream while charging every decompressed byte.
+
+    Returns `(status, bytes_charged, payload_bytes, error_detail)` where `status` is:
+    - `"ok"`: complete zlib stream inflated within `max_len` (`bytes_charged == len(payload_bytes)`).
+    - `"limit"`: output exceeded `max_len` (`bytes_charged >= max_len + 1`).
+    - `"corrupt"`: malformed or truncated zlib stream (`bytes_charged` includes all bytes produced
+      prior to failure plus one bounded in-flight step so repeated failing chunks exhaust budget).
+    """
+    dobj = zlib.decompressobj()
+    total_in = len(comp_bytes)
+    produced_total = 0
+    chunks: List[bytes] = []
+
+    try:
+        in_offset = 0
+        while in_offset < total_in and not dobj.eof:
+            in_end = min(total_in, in_offset + DECOMPRESS_STEP_BYTES)
+            pending: bytes = comp_bytes[in_offset:in_end]
+            while pending and not dobj.eof:
+                remaining_out = max_len - produced_total
+                if remaining_out <= 0:
+                    probe = dobj.decompress(pending, 1)
+                    if probe or dobj.unconsumed_tail:
+                        return (
+                            "limit",
+                            produced_total + max(1, len(probe)),
+                            b"",
+                            f"Decompressed payload exceeds {max_len} byte safety limit",
+                        )
+                    break
+                step_cap = min(DECOMPRESS_STEP_BYTES, remaining_out)
+                part = dobj.decompress(pending, step_cap)
+                if part:
+                    chunks.append(part)
+                    produced_total += len(part)
+                pending = dobj.unconsumed_tail
+                if not part and not pending:
+                    break
+            in_offset = in_end
+
+        if not dobj.eof:
+            tail = dobj.flush()
+            if tail:
+                if produced_total + len(tail) > max_len:
+                    return (
+                        "limit",
+                        produced_total + len(tail),
+                        b"",
+                        f"Decompressed payload exceeds {max_len} byte safety limit",
+                    )
+                chunks.append(tail)
+                produced_total += len(tail)
+
+        if not dobj.eof:
+            charged = produced_total if produced_total > 0 else min(DECOMPRESS_STEP_BYTES, max(1, total_in))
+            return "corrupt", charged, b"", "Incomplete or truncated zlib stream"
+
+        return "ok", produced_total, b"".join(chunks), ""
+    except zlib.error as exc:
+        in_flight = min(DECOMPRESS_STEP_BYTES, max(1, total_in))
+        return "corrupt", produced_total + in_flight, b"", str(exc)
 
 
 def _decompress_bounded(comp_bytes: bytes, max_len: int = MAX_ICC_DECOMPRESSED_BYTES) -> bytes:
-    dobj = zlib.decompressobj()
-    out = dobj.decompress(comp_bytes, max_len + 1)
-    if len(out) > max_len or dobj.unconsumed_tail:
-        raise zlib.error(f"Decompressed payload exceeds {max_len} byte safety limit")
-    out += dobj.flush()
-    return out
+    status, _charged, payload, err = _decompress_bounded_accounted(comp_bytes, max_len=max_len)
+    if status != "ok":
+        raise zlib.error(err)
+    return payload
 
 
 def _parse_icc_profile_bytes(icc_bytes: bytes, source_offset: int) -> Dict[str, Any]:
@@ -186,6 +254,8 @@ def _inspect_png(raw: bytes, label: str) -> Dict[str, Any]:
     icc_profiles: List[Dict[str, Any]] = []
     text_software_tags: List[Dict[str, Any]] = []
     saw_iend = False
+    total_icc_decompressed = 0
+    icc_budget_exhausted = False
 
     while pos + 8 <= len(raw):
         chunk_offset = pos
@@ -227,15 +297,53 @@ def _inspect_png(raw: bytes, label: str) -> Dict[str, Any]:
                 nul_idx = chunk_data.index(b"\x00")
                 prof_name = chunk_data[:nul_idx].decode("latin-1", errors="replace")
                 if nul_idx + 2 <= len(chunk_data) and chunk_data[nul_idx + 1] == 0:
-                    try:
-                        decompressed = _decompress_bounded(chunk_data[nul_idx + 2 :])
-                        parsed_icc = _parse_icc_profile_bytes(decompressed, chunk_offset)
-                        parsed_icc["png_iccp_name"] = prof_name
-                        icc_profiles.append(parsed_icc)
-                    except zlib.error as exc:
-                        crc_errors.append(
-                            {"byte_offset": chunk_offset, "chunk": "iCCP", "reason": f"zlib error: {exc}"}
+                    remaining_icc = MAX_TOTAL_ICC_DECOMPRESSED_BYTES - total_icc_decompressed
+                    if remaining_icc < 0 or icc_budget_exhausted:
+                        if not icc_budget_exhausted:
+                            icc_budget_exhausted = True
+                            container_errors.append(
+                                {
+                                    "byte_offset": chunk_offset,
+                                    "reason": "Cumulative PNG iCCP decompression exceeded 32 MiB safety budget",
+                                }
+                            )
+                    else:
+                        step_cap = min(MAX_ICC_DECOMPRESSED_BYTES, remaining_icc)
+                        status, produced_bytes, decompressed, err_msg = _decompress_bounded_accounted(
+                            chunk_data[nul_idx + 2 :],
+                            max_len=step_cap,
                         )
+                        total_icc_decompressed += produced_bytes
+                        if status == "ok":
+                            parsed_icc = _parse_icc_profile_bytes(decompressed, chunk_offset)
+                            parsed_icc["png_iccp_name"] = prof_name
+                            icc_profiles.append(parsed_icc)
+                        elif status == "limit":
+                            if total_icc_decompressed > MAX_TOTAL_ICC_DECOMPRESSED_BYTES:
+                                if not icc_budget_exhausted:
+                                    icc_budget_exhausted = True
+                                    container_errors.append(
+                                        {
+                                            "byte_offset": chunk_offset,
+                                            "reason": "Cumulative PNG iCCP decompression exceeded 32 MiB safety budget",
+                                        }
+                                    )
+                            else:
+                                crc_errors.append(
+                                    {"byte_offset": chunk_offset, "chunk": "iCCP", "reason": f"zlib error: {err_msg}"}
+                                )
+                        else:
+                            crc_errors.append(
+                                {"byte_offset": chunk_offset, "chunk": "iCCP", "reason": f"zlib error: {err_msg}"}
+                            )
+                            if total_icc_decompressed > MAX_TOTAL_ICC_DECOMPRESSED_BYTES and not icc_budget_exhausted:
+                                icc_budget_exhausted = True
+                                container_errors.append(
+                                    {
+                                        "byte_offset": chunk_offset,
+                                        "reason": "Cumulative PNG iCCP decompression exceeded 32 MiB safety budget",
+                                    }
+                                )
             elif ctype_bytes in (b"tEXt", b"iTXt") and any(
                 k in chunk_data for k in (b"Software", b"Creator", b"Author", b"Comment", b"Adobe", b"Photoshop")
             ):

@@ -8,7 +8,7 @@ on:
       release_tag:
         description: "Signed GitHub Release tag whose canonical wheel/sdist will be published"
         required: false
-        default: "v0.3.9"
+        default: "v0.3.10"
         type: string
 
 permissions:
@@ -27,14 +27,9 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Run unit, benchmark & cross-tool reference validation gates
-        run: |
-          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error -m unittest discover -s tests -v
-          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error benchmark/benchmark_suite.py
-          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -W error scripts/verify_cross_tool_forensics.py
-      - name: Fetch & cryptographically verify canonical signed release distributions
+      - name: Fetch, cryptographically verify & test canonical signed release distributions
         env:
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || 'v0.3.9' }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || 'v0.3.10' }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -46,7 +41,7 @@ jobs:
           WHL_NAME="starshield_forensics-${VER}-py3-none-any.whl"
           SDIST_NAME="starshield_forensics-${VER}.tar.gz"
 
-          mkdir -p /tmp/release-verify dist
+          mkdir -p /tmp/release-verify /tmp/sdist-gate dist
           curl -fsSL "${BASE_URL}/SHA256SUMS" -o /tmp/release-verify/SHA256SUMS
           curl -fsSL "${BASE_URL}/SHA256SUMS.sig" -o /tmp/release-verify/SHA256SUMS.sig
           curl -fsSL "${BASE_URL}/${WHL_NAME}" -o "/tmp/release-verify/${WHL_NAME}"
@@ -60,7 +55,24 @@ jobs:
 
           (
             cd /tmp/release-verify
-            grep -E "  (${WHL_NAME}|${SDIST_NAME})$" SHA256SUMS | sha256sum -c -
+            for req_asset in "${WHL_NAME}" "${SDIST_NAME}"; do
+              line="$(awk -v target="$req_asset" 'length($1) == 64 && $1 ~ /^[0-9a-f]+$/ && ($2 == target || $2 == ("*" target)) && NF == 2 { print; exit }' SHA256SUMS)"
+              if [[ -z "$line" ]]; then
+                echo "Missing required SHA256SUMS entry for ${req_asset}" >&2
+                exit 1
+              fi
+              printf '%s\n' "$line" | sha256sum -c -
+            done
+          )
+
+          tar -xzf "/tmp/release-verify/${SDIST_NAME}" -C /tmp/sdist-gate
+          (
+            cd "/tmp/sdist-gate/starshield_forensics-${VER}"
+            PYTHONDONTWRITEBYTECODE=1 python -W error -m unittest discover -s tests -v
+            PYTHONDONTWRITEBYTECODE=1 python -W error benchmark/benchmark_suite.py
+            PYTHONDONTWRITEBYTECODE=1 python -W error scripts/verify_cross_tool_forensics.py
+            rm -rf samples
+            PYTHONDONTWRITEBYTECODE=1 python -W error -m unittest discover -s tests -v
           )
 
           cp "/tmp/release-verify/${WHL_NAME}" "dist/${WHL_NAME}"

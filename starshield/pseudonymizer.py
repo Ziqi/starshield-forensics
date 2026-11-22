@@ -46,11 +46,23 @@ MAX_EXTRACTED_AMOUNTS = 64
 _SESSION_TAG_RE = re.compile(r"^[0-9A-F]{4}$")
 _TOKEN_PLACEHOLDER_RE = re.compile(r"<([A-Z0-9_]+)_([0-9A-F]{4})_([0-9]{2,5})>")
 
+_CURRENCY_AMOUNT_NUM_PAT = (
+    r"(?:"
+    r"[0-9]{1,3}(?:\.[0-9]{3})+,[0-9]{1,2}"
+    r"|[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,4})?"
+    r"|[0-9]+(?:\.[0-9]{1,4}|,[0-9]{2})?"
+    r")"
+    r"(?![0-9A-Za-z]|[.,][0-9])"
+)
 _CURRENCY_AMOUNT_RE = re.compile(
     r"(?:"
-    r"\b(?:USD|EUR|GBP|HKD|CNY|RMB|SGD|AUD|CAD|CHF|JPY|USDT|USDC)\s*[0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?\b"
-    r"|(?:HK\$|US\$|S\$|[£$€¥])\s*[0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?\b"
-    r")"
+    r"(?<![A-Za-z0-9])(?:USD|EUR|GBP|HKD|CNY|RMB|SGD|AUD|CAD|CHF|JPY|USDT|USDC)\s*"
+    + _CURRENCY_AMOUNT_NUM_PAT
+    + r"|(?<![A-Za-z0-9])(?:HK\$|US\$|S\$|\$)\s*"
+    + _CURRENCY_AMOUNT_NUM_PAT
+    + r"|[£€¥]\s*"
+    + _CURRENCY_AMOUNT_NUM_PAT
+    + r")"
 )
 
 
@@ -170,8 +182,9 @@ class SessionPseudonymizer:
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "storage_security_notice": (
                 "OS 0600-protected plaintext lookup table (Python stdlib has no native AES-GCM). "
-                "Prefer RAM-backed tmpfs (/dev/shm) on jump hosts and execute "
-                "`starshield shred-vault --vault <path>` immediately after detokenization."
+                "Prefer RAM-backed tmpfs (/dev/shm on Linux) or a chmod 0700 private directory "
+                "(e.g. ~/.starshield on macOS), and execute `starshield shred-vault --vault <path>` "
+                "immediately after detokenization."
             ),
             "token_counts": self.token_counts(),
             "token_to_raw": dict(self._token_to_raw),
@@ -183,8 +196,16 @@ class SessionPseudonymizer:
         if target.is_symlink():
             raise OSError("Refusing to write token vault through a symbolic link")
         parent = target.parent
+        if parent.is_symlink():
+            raise OSError("Refusing to write token vault inside a symbolic-link directory")
         if parent and not parent.exists():
-            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            grandparent = parent.parent
+            if not grandparent or grandparent == parent or not grandparent.exists() or not grandparent.is_dir():
+                raise OSError("Token vault parent directory does not exist")
+            try:
+                parent.mkdir(mode=0o700, exist_ok=True)
+            except OSError as exc:
+                raise OSError("Token vault parent directory does not exist") from exc
 
         serialized = json.dumps(self.export_vault_dict(), indent=2, ensure_ascii=False).encode("utf-8")
         if len(serialized) > MAX_VAULT_BYTES:
@@ -283,24 +304,73 @@ def detokenize_text(
     return restored, replaced_count, unmatched
 
 
+def _write_all(fd: int, buf: bytes) -> None:
+    """Write all bytes in `buf` to file descriptor `fd`, looping across short OS writes."""
+    mv = memoryview(buf)
+    written = 0
+    total = len(mv)
+    while written < total:
+        n = os.write(fd, mv[written:])
+        if n <= 0:
+            raise OSError("Short or zero-byte write while overwriting token vault")
+        written += n
+
+
+def _read_fd_bounded(fd: int, max_bytes: int) -> bytes:
+    """Read from `fd` from offset 0 up to `max_bytes + 1` bytes without closing `fd`."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: List[bytes] = []
+    total = 0
+    while True:
+        want = min(65536, (max_bytes + 1) - total)
+        part = os.read(fd, want)
+        if not part:
+            break
+        chunks.append(part)
+        total += len(part)
+        if total > max_bytes:
+            break
+    return b"".join(chunks)
+
+
 def shred_vault_file(vault_path: Path) -> Dict[str, Any]:
-    """Best-effort logical overwrite (`random` + `0x00` + `fsync`) and unlink (`O_NOFOLLOW`); not physical SSD/CoW sanitization."""
+    """Best-effort logical overwrite (`random` + `0x00` + `fsync`) and unlink (`O_NOFOLLOW`) after verifying vault schema."""
     target = Path(vault_path)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(target), os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | nofollow)
     size = 0
+    refusal_msg = "Refusing to shred file: target does not carry a valid starshield-token-vault/v1 header"
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise OSError("Refusing to shred non-regular file")
         if st.st_size > MAX_VAULT_BYTES:
             raise ValueError(f"File exceeds {MAX_VAULT_BYTES} byte vault cap; refusing to shred")
-        size = max(st.st_size, 256)
+        if st.st_size <= 0:
+            raise ValueError(refusal_msg)
+
+        raw_existing = _read_fd_bounded(fd, MAX_VAULT_BYTES)
+        if not raw_existing or len(raw_existing) > MAX_VAULT_BYTES:
+            raise ValueError(f"File exceeds {MAX_VAULT_BYTES} byte vault cap; refusing to shred")
+        try:
+            parsed = json.loads(raw_existing.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(refusal_msg) from exc
+
+        if (
+            not isinstance(parsed, dict)
+            or parsed.get("vault_schema") != "starshield-token-vault/v1"
+            or not _SESSION_TAG_RE.fullmatch(str(parsed.get("session_tag", "")).strip().upper())
+            or not isinstance(parsed.get("token_to_raw"), dict)
+        ):
+            raise ValueError(refusal_msg)
+
+        size = max(len(raw_existing), st.st_size, 256)
         os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, secrets.token_bytes(size))
+        _write_all(fd, secrets.token_bytes(size))
         os.fsync(fd)
         os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, b"\x00" * size)
+        _write_all(fd, b"\x00" * size)
         os.fsync(fd)
     finally:
         os.close(fd)
