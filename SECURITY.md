@@ -6,8 +6,8 @@
 
 | Version | Supported |
 | :--- | :--- |
-| `0.3.10` (latest) | Supported |
-| `< 0.3.10` | Upgrade straight to `0.3.10` (CLI & JSON schemas remain backwards-compatible) |
+| `0.3.11` (latest) | Supported |
+| `< 0.3.11` | Upgrade straight to `0.3.11` (CLI & JSON schemas remain backwards-compatible) |
 
 ## 2. Private Vulnerability Reporting (`vulnerability_report_private`)
 

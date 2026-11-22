@@ -23,10 +23,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from starshield import __version__ as STARSHIELD_VERSION  # noqa: E402
 
-RELEASE_VERSION = "0.3.10"
+RELEASE_VERSION = "0.3.11"
 CREATED_UTC = "2026-11-22T00:00:00Z"
 
-PINNED_PYZ_SHA256 = "c2ab9034d9e5aaeff4a2f16250261dff58d49233edcfeb91ab799d7898e6f3e0"
+PINNED_PYZ_SHA256 = "7bdcf29b9471c19375251d24a9993d946224be167d5187735d2343262618a3b7"
 
 
 def _sha256_file(path: Path) -> str:

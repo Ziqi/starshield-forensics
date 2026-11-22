@@ -27,6 +27,8 @@ Architectural Security Invariants:
 from __future__ import annotations
 
 import copy
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -38,21 +40,31 @@ from typing import Any, Dict, List, Tuple
 
 from starshield import __version__
 from starshield.ioc_validators import extract_validated_iocs
+from starshield.leveldb_log import SafeDiagnosticError, dumps_strict_json, sanitize_utf8_str
 
 MAX_VAULT_BYTES = 4 * 1024 * 1024
 MAX_TOKENS_PER_CATEGORY = 10000
 MAX_EXTRACTED_AMOUNTS = 64
 
+
+def _parse_bounded_vault_int(num_str: str) -> int:
+    if len(num_str.lstrip("+-")) > 64:
+        raise ValueError("Vault integer exceeds bounded 64-digit safety limit")
+    return int(num_str)
+
 _SESSION_TAG_RE = re.compile(r"^[0-9A-F]{4}$")
-_TOKEN_PLACEHOLDER_RE = re.compile(r"<([A-Z0-9_]+)_([0-9A-F]{4})_([0-9]{2,5})>")
+_TOKEN_PLACEHOLDER_RE = re.compile(r"<([A-Z0-9_]+)_([0-9A-F]{4})_([0-9]{2,5}|OVR_[0-9A-F]{12})>")
 
 _CURRENCY_AMOUNT_NUM_PAT = (
     r"(?:"
-    r"[0-9]{1,3}(?:\.[0-9]{3})+,[0-9]{1,2}"
+    r"[0-9]{1,3}(?:\.[0-9]{3})+(?:,[0-9]{2})?"
+    r"|[0-9]{1,3}(?:['\u2019][0-9]{3})+(?:\.[0-9]{1,4}|,[0-9]{2})?"
+    r"|[0-9]{1,3}(?:[ \u00a0\u202f][0-9]{3})+(?:,[0-9]{2}|\.[0-9]{2})"
     r"|[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,4})?"
-    r"|[0-9]+(?:\.[0-9]{1,4}|,[0-9]{2})?"
+    r"|[0-9]+(?:\.[0-9]{1,4}|,[0-9]{2})"
+    r"|[0-9]+(?![ \u00a0\u202f][0-9]{3}(?:[ \u00a0\u202f][0-9]{3})*(?:[.,][0-9]|[ \u00a0\u202f][0-9]{1,2}(?![0-9])))"
     r")"
-    r"(?![0-9A-Za-z]|[.,][0-9])"
+    r"(?![0-9A-Za-z]|[.,'\u2019][0-9])"
 )
 _CURRENCY_AMOUNT_RE = re.compile(
     r"(?:"
@@ -102,23 +114,21 @@ class SessionPseudonymizer:
         self._cat_counters: Dict[str, int] = {}
         self._raw_to_token: Dict[Tuple[str, str], str] = {}
         self._token_to_raw: Dict[str, str] = {}
+        self._overflow_salt = secrets.token_bytes(32)
+        self._cap_exceeded_categories: set[str] = set()
 
     def assign(self, category: str, raw_value: str) -> str:
-        """Assign or retrieve `<CATEGORY_[CC_]<TAG4>_NN>` for `(category, raw_value)`."""
+        """Assign `<CATEGORY_[CC_]<TAG4>_NN>`, falling back to `<..._OVR_HMAC12>` past 10,000 entries."""
         if not raw_value:
             return ""
+        clean_raw = sanitize_utf8_str(raw_value)
         norm_cat = re.sub(r"[^A-Z0-9_]", "", category.upper()) or "ITEM"
-        key = (norm_cat, raw_value)
+        key = (norm_cat, clean_raw)
         existing = self._raw_to_token.get(key)
         if existing is not None:
             return existing
 
-        next_idx = self._cat_counters.get(norm_cat, 0) + 1
-        if next_idx > MAX_TOKENS_PER_CATEGORY:
-            raise ValueError(f"Pseudonymizer token cap ({MAX_TOKENS_PER_CATEGORY}) exceeded for {norm_cat}")
-        self._cat_counters[norm_cat] = next_idx
-
-        compact = raw_value.strip().upper()
+        compact = clean_raw.strip().upper()
         if norm_cat == "IBAN" and len(compact) >= 2 and compact[:2].isalpha() and compact[:2].isascii():
             prefix = f"IBAN_{compact[:2]}"
         elif norm_cat == "BIC" and len(compact) >= 6 and compact[4:6].isalpha() and compact[4:6].isascii():
@@ -126,13 +136,28 @@ class SessionPseudonymizer:
         else:
             prefix = norm_cat
 
+        cur_count = self._cat_counters.get(norm_cat, 0)
+        if cur_count >= MAX_TOKENS_PER_CATEGORY:
+            self._cap_exceeded_categories.add(norm_cat)
+            hmac_hex = hmac.new(
+                self._overflow_salt,
+                f"{norm_cat}:{clean_raw}".encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()[:12].upper()
+            return f"<{prefix}_{self.session_tag}_OVR_{hmac_hex}>"
+
+        next_idx = cur_count + 1
+        self._cat_counters[norm_cat] = next_idx
         token = f"<{prefix}_{self.session_tag}_{next_idx:02d}>"
         self._raw_to_token[key] = token
-        self._token_to_raw[token] = raw_value
+        self._token_to_raw[token] = clean_raw
         return token
 
     def token_counts(self) -> Dict[str, int]:
         return dict(self._cat_counters)
+
+    def cap_exceeded_categories(self) -> List[str]:
+        return sorted(self._cap_exceeded_categories)
 
     def pseudonymize_iocs_from_text(self, text: str) -> Dict[str, Any]:
         """Extract mathematically validated IOCs from `text` and replace values with session tokens."""
@@ -187,27 +212,55 @@ class SessionPseudonymizer:
                 "immediately after detokenization."
             ),
             "token_counts": self.token_counts(),
+            "cap_exceeded_categories": self.cap_exceeded_categories(),
             "token_to_raw": dict(self._token_to_raw),
         }
 
     def save_vault_atomic(self, vault_path: Path) -> None:
-        """Persist reverse token vault locally with strict `0600` permissions and `O_NOFOLLOW`."""
+        """Persist reverse token vault locally with strict `0600` permissions, `O_NOFOLLOW`, and anti-clobber check."""
         target = Path(vault_path)
-        if target.is_symlink():
-            raise OSError("Refusing to write token vault through a symbolic link")
+        existing_st: os.stat_result | None = None
+        try:
+            existing_st = os.lstat(target)
+        except FileNotFoundError:
+            existing_st = None
+
+        if existing_st is not None:
+            if stat.S_ISLNK(existing_st.st_mode) or not stat.S_ISREG(existing_st.st_mode):
+                raise OSError("Refusing to write token vault through a symbolic link or non-regular file")
+            try:
+                load_vault_strict(target)
+            except (
+                OSError,
+                ValueError,
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+                RecursionError,
+                MemoryError,
+            ) as exc:
+                raise SafeDiagnosticError(
+                    "Refusing to overwrite existing file: target is not a valid starshield-token-vault/v1 file"
+                ) from exc
+
         parent = target.parent
         if parent.is_symlink():
             raise OSError("Refusing to write token vault inside a symbolic-link directory")
         if parent and not parent.exists():
             grandparent = parent.parent
-            if not grandparent or grandparent == parent or not grandparent.exists() or not grandparent.is_dir():
+            if (
+                not grandparent
+                or grandparent == parent
+                or grandparent.is_symlink()
+                or not grandparent.exists()
+                or not grandparent.is_dir()
+            ):
                 raise OSError("Token vault parent directory does not exist")
             try:
                 parent.mkdir(mode=0o700, exist_ok=True)
             except OSError as exc:
                 raise OSError("Token vault parent directory does not exist") from exc
 
-        serialized = json.dumps(self.export_vault_dict(), indent=2, ensure_ascii=False).encode("utf-8")
+        serialized = dumps_strict_json(self.export_vault_dict(), indent=2).encode("utf-8")
         if len(serialized) > MAX_VAULT_BYTES:
             raise ValueError(f"Token vault exceeds {MAX_VAULT_BYTES} byte safety cap")
 
@@ -219,8 +272,31 @@ class SessionPseudonymizer:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(serialized)
                 fh.flush()
+                if hasattr(os, "fchmod"):
+                    os.fchmod(fh.fileno(), 0o600)
                 os.fsync(fh.fileno())
+                tmp_st = os.fstat(fh.fileno())
+            cur_tmp_st = os.lstat(tmp_path)
+            if not stat.S_ISREG(cur_tmp_st.st_mode) or (cur_tmp_st.st_dev, cur_tmp_st.st_ino) != (
+                tmp_st.st_dev,
+                tmp_st.st_ino,
+            ):
+                raise OSError("Temporary token vault inode changed during write (TOCTOU detected)")
             os.chmod(tmp_path, 0o600)
+            try:
+                cur_target_st = os.lstat(target)
+            except FileNotFoundError:
+                cur_target_st = None
+            if existing_st is None:
+                if cur_target_st is not None:
+                    raise OSError("Refusing to replace newly appeared file at token vault path (TOCTOU detected)")
+            else:
+                if (
+                    cur_target_st is None
+                    or not stat.S_ISREG(cur_target_st.st_mode)
+                    or (cur_target_st.st_dev, cur_target_st.st_ino) != (existing_st.st_dev, existing_st.st_ino)
+                ):
+                    raise OSError("Refusing to replace token vault: target inode changed during write (TOCTOU detected)")
             os.replace(tmp_path, target)
         except BaseException:
             try:
@@ -251,7 +327,10 @@ def load_vault_strict(vault_path: Path) -> Tuple[Dict[str, str], str]:
     if len(raw) > MAX_VAULT_BYTES:
         raise ValueError(f"Token vault exceeds {MAX_VAULT_BYTES} byte safety limit")
 
-    parsed = json.loads(raw.decode("utf-8"))
+    try:
+        parsed = json.loads(raw.decode("utf-8"), parse_int=_parse_bounded_vault_int)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, MemoryError, ValueError) as exc:
+        raise ValueError("Invalid or unsupported StarShield token vault JSON") from exc
     if not isinstance(parsed, dict) or parsed.get("vault_schema") != "starshield-token-vault/v1":
         raise ValueError("Invalid or unsupported StarShield token vault schema")
     session_tag = str(parsed.get("session_tag", "")).strip().upper()
@@ -334,16 +413,19 @@ def _read_fd_bounded(fd: int, max_bytes: int) -> bytes:
 
 
 def shred_vault_file(vault_path: Path) -> Dict[str, Any]:
-    """Best-effort logical overwrite (`random` + `0x00` + `fsync`) and unlink (`O_NOFOLLOW`) after verifying vault schema."""
+    """Best-effort logical overwrite (`random` + `0x00` + `fsync`) and inode-verified unlink (`O_NOFOLLOW`)."""
     target = Path(vault_path)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(target), os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | nofollow)
     size = 0
+    orig_dev = -1
+    orig_ino = -1
     refusal_msg = "Refusing to shred file: target does not carry a valid starshield-token-vault/v1 header"
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise OSError("Refusing to shred non-regular file")
+        orig_dev, orig_ino = st.st_dev, st.st_ino
         if st.st_size > MAX_VAULT_BYTES:
             raise ValueError(f"File exceeds {MAX_VAULT_BYTES} byte vault cap; refusing to shred")
         if st.st_size <= 0:
@@ -353,8 +435,8 @@ def shred_vault_file(vault_path: Path) -> Dict[str, Any]:
         if not raw_existing or len(raw_existing) > MAX_VAULT_BYTES:
             raise ValueError(f"File exceeds {MAX_VAULT_BYTES} byte vault cap; refusing to shred")
         try:
-            parsed = json.loads(raw_existing.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            parsed = json.loads(raw_existing.decode("utf-8"), parse_int=_parse_bounded_vault_int)
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, MemoryError, ValueError) as exc:
             raise ValueError(refusal_msg) from exc
 
         if (
@@ -375,7 +457,10 @@ def shred_vault_file(vault_path: Path) -> Dict[str, Any]:
     finally:
         os.close(fd)
 
-    target.unlink()
+    cur_st = os.lstat(target)
+    if not stat.S_ISREG(cur_st.st_mode) or (cur_st.st_dev, cur_st.st_ino) != (orig_dev, orig_ino):
+        raise OSError("Refusing to unlink token vault: target inode changed before unlink (TOCTOU detected)")
+    os.unlink(target)
     return {
         "shredded": True,
         "erasure_guarantee": "best_effort_logical_overwrite_and_unlink_only",

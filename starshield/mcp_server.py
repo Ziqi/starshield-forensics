@@ -25,6 +25,7 @@ Privacy-by-Default Structural Airlock:
 from __future__ import annotations
 
 import json
+import math
 import secrets
 import sys
 from pathlib import Path
@@ -34,6 +35,7 @@ from starshield import __version__
 from starshield.cli import (
     MAX_DEFAULT_MB,
     SafeDiagnosticError,
+    _parse_bounded_json_int,
     apply_image_redaction,
     apply_wal_record_redaction,
     build_acquisition_manifest,
@@ -46,8 +48,11 @@ from starshield.image_containers import inspect_image_container
 from starshield.ioc_validators import VALIDATION_SCOPE_NOTE, extract_validated_iocs
 from starshield.leveldb_log import (
     VALID_SCHEMA_MODES,
+    dumps_strict_json,
     inspect_chromium_storage_path,
     parse_leveldb_wal,
+    sanitize_json_value,
+    sanitize_utf8_str,
 )
 from starshield.pdf_containers import apply_pdf_redaction, inspect_pdf_container
 from starshield.pseudonymizer import SessionPseudonymizer, extract_currency_amounts
@@ -314,6 +319,8 @@ def _dispatch_tool_call(
                 payload["pseudonym_session_id"] = active_pseudo.session_id
                 payload["pseudonym_session_tag"] = active_pseudo.session_tag
                 payload["pseudonym_token_counts"] = active_pseudo.token_counts()
+                if active_pseudo.cap_exceeded_categories():
+                    payload["pseudonym_cap_exceeded_categories"] = active_pseudo.cap_exceeded_categories()
         elif tool_name == "starshield_triage_json":
             raw_json_p = arguments.get("json_path")
             if not isinstance(raw_json_p, str) or not raw_json_p.strip():
@@ -323,7 +330,9 @@ def _dispatch_tool_call(
                 raise SafeDiagnosticError(f"'schema_mode' must be one of {VALID_SCHEMA_MODES}")
             json_path = Path(raw_json_p)
             raw_bytes = read_bounded_bytes(json_path, max_mb=max_mb, redact=redact)
-            parsed_json = json.loads(raw_bytes.decode("utf-8"), parse_int=_parse_bounded_json_int)
+            parsed_json = sanitize_json_value(
+                json.loads(raw_bytes.decode("utf-8"), parse_int=_parse_bounded_json_int)
+            )
             triaged = triage_exported_chatsvc_json(
                 parsed_json,
                 redact=redact,
@@ -340,6 +349,8 @@ def _dispatch_tool_call(
                 payload["pseudonym_session_id"] = active_pseudo.session_id
                 payload["pseudonym_session_tag"] = active_pseudo.session_tag
                 payload["pseudonym_token_counts"] = active_pseudo.token_counts()
+                if active_pseudo.cap_exceeded_categories():
+                    payload["pseudonym_cap_exceeded_categories"] = active_pseudo.cap_exceeded_categories()
         elif tool_name == "starshield_inspect_image_tamper":
             raw_img = arguments.get("image_path")
             if not isinstance(raw_img, str) or not raw_img.strip():
@@ -360,6 +371,7 @@ def _dispatch_tool_call(
             raw_text = arguments.get("text")
             if not isinstance(raw_text, str):
                 raise SafeDiagnosticError("'text' must be a UTF-8 string")
+            raw_text = sanitize_utf8_str(raw_text)
             encoded_len = len(raw_text.encode("utf-8"))
             if encoded_len > int(max_mb) * 1024 * 1024:
                 raise SafeDiagnosticError(f"Input text exceeds --max-mb={int(max_mb)} safety limit")
@@ -380,6 +392,8 @@ def _dispatch_tool_call(
                 )
                 payload["pseudonym_session_tag"] = active_pseudo.session_tag
                 payload["pseudonym_session_id"] = active_pseudo.session_id
+                if active_pseudo.cap_exceeded_categories():
+                    payload["pseudonym_cap_exceeded_categories"] = active_pseudo.cap_exceeded_categories()
         elif tool_name == "starshield_inspect_pdf_tamper":
             raw_pdf = arguments.get("pdf_path")
             if not isinstance(raw_pdf, str) or not raw_pdf.strip():
@@ -403,7 +417,7 @@ def _dispatch_tool_call(
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps(payload, indent=2, ensure_ascii=False),
+                    "text": dumps_strict_json(payload, indent=2),
                 }
             ],
             "isError": False,
@@ -431,7 +445,7 @@ def _dispatch_tool_call(
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps({"error": err_msg, "masked_mode": redact}, ensure_ascii=False),
+                    "text": dumps_strict_json({"error": err_msg, "masked_mode": redact}, indent=None),
                 }
             ],
             "isError": True,
@@ -442,7 +456,7 @@ def _dispatch_tool_call(
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps({"error": err_msg, "masked_mode": redact}, ensure_ascii=False),
+                    "text": dumps_strict_json({"error": err_msg, "masked_mode": redact}, indent=None),
                 }
             ],
             "isError": True,
@@ -459,7 +473,19 @@ def handle_mcp_message(
 ) -> Dict[str, Any] | None:
     """Process a single parsed JSON-RPC 2.0 message and return a response dict (or None for notifications)."""
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
-        req_id = msg.get("id") if isinstance(msg, dict) else None
+        raw_id = msg.get("id") if isinstance(msg, dict) else None
+        req_id = (
+            raw_id
+            if (
+                raw_id is None
+                or (
+                    isinstance(raw_id, (str, int, float))
+                    and not isinstance(raw_id, bool)
+                    and not (isinstance(raw_id, float) and (math.isnan(raw_id) or math.isinf(raw_id)))
+                )
+            )
+            else None
+        )
         return {
             "jsonrpc": "2.0",
             "id": req_id,
@@ -469,10 +495,19 @@ def handle_mcp_message(
     method = msg.get("method")
     has_id = "id" in msg
     req_id = msg.get("id")
+    if has_id:
+        if isinstance(req_id, float) and (math.isnan(req_id) or math.isinf(req_id)):
+            req_id = None
+        elif req_id is not None and (not isinstance(req_id, (str, int, float)) or isinstance(req_id, bool)):
+            return {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32600, "message": "Invalid JSON-RPC 2.0 'id' member (must be string, number, or null)"},
+            }
     if not isinstance(method, str) or not method:
         return {
             "jsonrpc": "2.0",
-            "id": req_id,
+            "id": req_id if has_id else None,
             "error": {"code": -32600, "message": "Missing or non-string 'method' field"},
         }
 
@@ -579,7 +614,10 @@ def handle_mcp_message(
 
 
 def _write_rpc_frame(outstream: BinaryIO, payload: Dict[str, Any], framing: str) -> None:
-    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    try:
+        body = dumps_strict_json(payload, indent=None, separators=(",", ":")).encode("utf-8")
+    except (RecursionError, MemoryError, ValueError, TypeError):
+        body = b'{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal MCP serialization error"}}'
     if framing == "content-length":
         header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
         outstream.write(header + body)
@@ -645,12 +683,6 @@ def _read_next_rpc_frame(instream: BinaryIO) -> Tuple[bytes | None, str, Dict[st
         return stripped, "line", None
 
 
-def _parse_bounded_json_int(num_str: str) -> int:
-    if len(num_str.lstrip("+-")) > 64:
-        raise ValueError("JSON integer exceeds bounded 64-digit safety limit")
-    return int(num_str)
-
-
 def run_mcp_stdio_server(
     *,
     redact: bool = True,
@@ -700,7 +732,19 @@ def run_mcp_stdio_server(
                 session_pseudonymizer=session_pseudo,
             )
         except Exception:
-            req_id = parsed.get("id") if isinstance(parsed, dict) else None
+            raw_id = parsed.get("id") if isinstance(parsed, dict) else None
+            req_id = (
+                raw_id
+                if (
+                    raw_id is None
+                    or (
+                        isinstance(raw_id, (str, int, float))
+                        and not isinstance(raw_id, bool)
+                        and not (isinstance(raw_id, float) and (math.isnan(raw_id) or math.isinf(raw_id)))
+                    )
+                )
+                else None
+            )
             response = {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -722,7 +766,7 @@ def run_mcp_stdio_server(
             try:
                 session_pseudo.save_vault_atomic(vault_file)
                 last_saved_total = sum(session_pseudo.token_counts().values())
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError, MemoryError):
                 vault_persist_warning = (
                     "Unable to persist local token vault; check --vault-file parent directory and permissions"
                 )

@@ -362,7 +362,7 @@ def mask_identifier(val: str, salt: bytes | None = None, digest_alg: str | None 
         raise ValueError(f"Unsupported HMAC digest algorithm: {digest_alg}")
     key = salt if salt is not None else DEFAULT_EPHEMERAL_SALT
     fn = SUPPORTED_HMAC_DIGESTS[digest_alg] if digest_alg else get_active_hmac_callable()
-    digest = hmac.new(key, val.encode("utf-8"), fn).hexdigest()[:12]
+    digest = hmac.new(key, val.encode("utf-8", errors="replace"), fn).hexdigest()[:12]
     return f"[REDACTED_HMAC:{digest}]"
 
 

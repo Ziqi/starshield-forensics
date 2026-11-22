@@ -34,11 +34,11 @@ jobs:
           python scripts/generate_spdx_sbom.py \
             --verify \
             --verify-pyz /tmp/ci-dists/starshield.pyz \
-            --wheel /tmp/ci-dists/starshield_forensics-0.3.10-py3-none-any.whl \
-            --sdist /tmp/ci-dists/starshield_forensics-0.3.10.tar.gz \
+            --wheel /tmp/ci-dists/starshield_forensics-0.3.11-py3-none-any.whl \
+            --sdist /tmp/ci-dists/starshield_forensics-0.3.11.tar.gz \
             --require-dists \
-            --output /tmp/ci-dists/starshield-forensics-0.3.10.spdx.json
-          python -c "import json; d=json.load(open('/tmp/ci-dists/starshield-forensics-0.3.10.spdx.json')); assert len(d['packages']) == 3 and all(len(p.get('checksums', [])) == 1 for p in d['packages'])"
+            --output /tmp/ci-dists/starshield-forensics-0.3.11.spdx.json
+          python -c "import json; d=json.load(open('/tmp/ci-dists/starshield-forensics-0.3.11.spdx.json')); assert len(d['packages']) == 3 and all(len(p.get('checksums', [])) == 1 for p in d['packages'])"
 
   test-and-package:
     runs-on: ubuntu-latest

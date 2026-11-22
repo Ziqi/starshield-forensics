@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2026 Ziqi Xiao
 # SPDX-License-Identifier: MIT
 """
-StarShield-Bench-24 (`v1.0.0` paired with `starshield-forensics v0.3.10`)
+StarShield-Bench-24 (`v1.0.0` paired with `starshield-forensics v0.3.11`)
 Author: Ziqi Xiao (@Ziqi)
 License: MIT
 

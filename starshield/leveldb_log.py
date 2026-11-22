@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
 import stat
 import struct
 from pathlib import Path
@@ -43,7 +45,107 @@ BLOCK_SIZE = 32768
 HEADER_SIZE = 7
 MAX_LOGICAL_RECORD_BYTES = 32 * 1024 * 1024  # 32 MiB anti-DoS cap per reassembled batch
 MAX_PRECHECK_SCAN_FILES = 4096  # Bounded directory walk cap for precheck
+MAX_CORRUPTED_RECORDS_REPORTED = 256  # Output-amplification cap on corrupted_frames array
+MAX_JSON_INT_DIGITS = 64  # Bounded JSON integer digit cap preventing >4300-digit conversion errors
+MAX_CARVE_DECODE_HEIGHT = 400  # Max balanced `{...}` height passed to CPython recursive raw_decode
 LEVELDB_SSTABLE_MAGIC_LE = struct.pack("<Q", 0xDB4775248B80FB57)
+SQLITE3_HEADER_MAGIC = b"SQLite format 3\x00"
+_LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+_JSON_OBJ_START_RE = re.compile(r'\{[ \t\r\n]*"')
+_JSON_CARVE_SCAN_RE = re.compile(r'"(?:[^"\\\x00-\x1f]|\\.)*"|(?<![.0-9eE+-])[0-9]{65,}(?![.eE])|["{}]')
+
+
+def sanitize_utf8_str(val: str) -> str:
+    """Replace lone UTF-16 surrogate code points (U+D800..U+DFFF) with U+FFFD for strict UTF-8 encoding."""
+    if _LONE_SURROGATE_RE.search(val) is None:
+        return val
+    return _LONE_SURROGATE_RE.sub("\ufffd", val)
+
+
+def sanitize_json_value(node: Any) -> Any:
+    """Iteratively normalize JSON structures of arbitrary depth: scrub lone surrogates and convert NaN/Inf to None."""
+    if node is None or isinstance(node, (bool, int)):
+        return node
+    if isinstance(node, float):
+        return None if (math.isnan(node) or math.isinf(node)) else node
+    if isinstance(node, str):
+        return sanitize_utf8_str(node)
+
+    if isinstance(node, dict):
+        root_out: Any = {}
+        stack: List[Tuple[Any, Any, bool]] = [(root_out, iter(node.items()), True)]
+    elif isinstance(node, (list, tuple)):
+        root_out = []
+        stack = [(root_out, iter(node), False)]
+    else:
+        return sanitize_utf8_str(str(node))
+
+    while stack:
+        dst, it, is_dict = stack[-1]
+        try:
+            item = next(it)
+        except StopIteration:
+            stack.pop()
+            continue
+
+        if is_dict:
+            raw_k, v = item
+            k = sanitize_utf8_str(raw_k) if isinstance(raw_k, str) else sanitize_utf8_str(str(raw_k))
+            if v is None or isinstance(v, (bool, int)):
+                dst[k] = v
+            elif isinstance(v, float):
+                dst[k] = None if (math.isnan(v) or math.isinf(v)) else v
+            elif isinstance(v, str):
+                dst[k] = sanitize_utf8_str(v)
+            elif isinstance(v, dict):
+                child_d: Dict[str, Any] = {}
+                dst[k] = child_d
+                stack.append((child_d, iter(v.items()), True))
+            elif isinstance(v, (list, tuple)):
+                child_l: List[Any] = []
+                dst[k] = child_l
+                stack.append((child_l, iter(v), False))
+            else:
+                dst[k] = sanitize_utf8_str(str(v))
+        else:
+            v = item
+            if v is None or isinstance(v, (bool, int)):
+                dst.append(v)
+            elif isinstance(v, float):
+                dst.append(None if (math.isnan(v) or math.isinf(v)) else v)
+            elif isinstance(v, str):
+                dst.append(sanitize_utf8_str(v))
+            elif isinstance(v, dict):
+                child_d = {}
+                dst.append(child_d)
+                stack.append((child_d, iter(v.items()), True))
+            elif isinstance(v, (list, tuple)):
+                child_l = []
+                dst.append(child_l)
+                stack.append((child_l, iter(v), False))
+            else:
+                dst.append(sanitize_utf8_str(str(v)))
+
+    return root_out
+
+
+def dumps_strict_json(
+    payload: Any,
+    *,
+    indent: int | None = 2,
+    separators: tuple[str, str] | None = None,
+    sort_keys: bool = False,
+) -> str:
+    """Serialize any Python structure to strict RFC 8259 UTF-8 JSON (allow_nan=False, zero surrogates)."""
+    clean = sanitize_json_value(payload)
+    return json.dumps(
+        clean,
+        indent=indent,
+        separators=separators,
+        sort_keys=sort_keys,
+        ensure_ascii=False,
+        allow_nan=False,
+    )
 
 
 class SafeDiagnosticError(ValueError):
@@ -312,34 +414,52 @@ _B2B_INVOICE_EXCLUSIVE_KEYS = frozenset(
         "iban",
         "sort_code",
         "account_number",
+        "routing_number",
+        "swift",
+        "bic",
         "beneficiary",
         "payee",
         "vendor",
         "supplier",
         "payment_instructions",
         "amount",
+        "total_due",
+        "payment_ref",
     }
 )
+_SKYPE_TEAMS_MRI_PREFIXES = ("8:", "live:", "28:", "4:")
 
 
 def _is_valid_chatsvc_message_obj(obj: Any, *, allow_generic_id_content: bool = False) -> bool:
     """Ensure carved JSON object is a top-level chatsvc message record, not a B2B invoice, Slack/Web messenger, or inner sub-dict."""
     if not isinstance(obj, dict):
         return False
-    msg_id = obj.get("id")
+    lower_map: Dict[str, Any] = {}
+    for k, v in obj.items():
+        kl = str(k).lower()
+        if kl not in lower_map:
+            lower_map[kl] = v
+    msg_id = obj.get("id", lower_map.get("id"))
     if msg_id is None or str(msg_id).strip() == "":
         return False
-    lower_keys = {str(k).lower() for k in obj.keys()}
+    lower_keys = set(lower_map.keys())
+    # Financial / invoice routing keys unconditionally veto chatsvc before properties/from checks
+    if lower_keys & _B2B_INVOICE_EXCLUSIVE_KEYS:
+        return False
     if lower_keys & _CHATSVC_SIGNATURE_KEYS:
         return True
-    props = obj.get("properties")
-    if isinstance(props, dict) and any(k in props for k in ("deletetime", "edittime", "emotions", "links")):
-        return True
-    if "from" in obj and not (
-        lower_keys & ({"body", "text", "t", "ts"} | _B2B_INVOICE_EXCLUSIVE_KEYS)
+    props = obj.get("properties", lower_map.get("properties"))
+    if isinstance(props, dict) and any(
+        str(pk).lower() in ("deletetime", "edittime", "emotions", "links") for pk in props.keys()
     ):
         return True
-    if allow_generic_id_content and "content" in obj and not (lower_keys & _B2B_INVOICE_EXCLUSIVE_KEYS):
+    from_val = obj.get("from", lower_map.get("from"))
+    if from_val is not None and not (lower_keys & {"body", "text", "t", "ts"}):
+        if isinstance(from_val, str) and from_val.strip().lower().startswith(_SKYPE_TEAMS_MRI_PREFIXES):
+            return True
+        if allow_generic_id_content:
+            return True
+    if allow_generic_id_content and "content" in lower_keys:
         return True
     return False
 
@@ -389,98 +509,158 @@ def classify_carved_json_object(obj: Any, schema_mode: str = "auto") -> str | No
 
 
 def _collect_string_scalars(node: Any, cap: int = 64) -> List[str]:
-    """Deterministically collect bounded string/number leaves for generic-json IOC & content normalization."""
+    """Iteratively collect bounded string/number leaves for generic-json IOC & content normalization."""
     acc: List[str] = []
-
-    def _walk(cur: Any) -> None:
-        if len(acc) >= cap or cur is None or isinstance(cur, bool):
-            return
+    work: List[Any] = [node]
+    while work and len(acc) < cap:
+        cur = work.pop()
+        if cur is None or isinstance(cur, bool):
+            continue
         if isinstance(cur, str):
             s = cur.strip()
             if s:
                 acc.append(s)
         elif isinstance(cur, (int, float)):
-            acc.append(str(cur))
+            if not (isinstance(cur, float) and (math.isnan(cur) or math.isinf(cur))):
+                acc.append(str(cur))
         elif isinstance(cur, dict):
+            nested_children: List[Any] = []
             for k in sorted(cur.keys(), key=str):
                 kl = str(k).lower()
                 if kl in ("blob_pad", "avatar", "thumbnail", "raw_html"):
                     continue
                 v = cur[k]
                 if isinstance(v, (str, int, float)) and not isinstance(v, bool):
+                    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                        continue
                     vs = str(v).strip()
                     if vs:
                         acc.append(f"{k}: {vs}")
                         if len(acc) >= cap:
-                            return
+                            break
                 else:
-                    _walk(v)
+                    nested_children.append(v)
+            if len(acc) < cap and nested_children:
+                work.extend(reversed(nested_children))
         elif isinstance(cur, list):
-            for item in cur:
-                _walk(item)
-
-    _walk(node)
+            work.extend(reversed(cur))
     return acc
 
 
+def _clean_ts_field(val: Any) -> Any:
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return None
+    if isinstance(val, str):
+        return sanitize_utf8_str(val)
+    return val
+
+
 def normalize_carved_record_fields(obj: Dict[str, Any], schema_tag: str) -> Dict[str, Any]:
-    """Map multi-platform web cache JSON fields onto StarShield's canonical record layout."""
-    props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
-    edited_sub = obj.get("edited") if isinstance(obj.get("edited"), dict) else {}
+    """Map multi-platform web cache JSON fields onto StarShield's canonical record layout (with case-insensitive fallback)."""
+    lower_map: Dict[str, Any] = {}
+    for k, v in obj.items():
+        kl = str(k).lower()
+        if kl not in lower_map:
+            lower_map[kl] = v
+
+    def _get_ci(d: Dict[str, Any], d_low: Dict[str, Any], key: str, default: Any = None) -> Any:
+        if key in d:
+            return d[key]
+        return d_low.get(key, default)
+
+    raw_props = _get_ci(obj, lower_map, "properties")
+    props = raw_props if isinstance(raw_props, dict) else {}
+    props_low: Dict[str, Any] = {}
+    for pk, pv in props.items():
+        pkl = str(pk).lower()
+        if pkl not in props_low:
+            props_low[pkl] = pv
+
+    raw_edited = _get_ci(obj, lower_map, "edited")
+    edited_sub = raw_edited if isinstance(raw_edited, dict) else {}
+    edited_low: Dict[str, Any] = {str(ek).lower(): ev for ek, ev in edited_sub.items()}
 
     msg_id = ""
     for k in _PORTAL_ID_KEYS + ("ts", "t"):
-        v = obj.get(k)
+        v = _get_ci(obj, lower_map, k)
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            continue
         if v is not None and str(v).strip() != "":
-            msg_id = str(v).strip()
+            msg_id = sanitize_utf8_str(str(v).strip())
             break
 
     sender = ""
     for k in ("from", "user", "sender", "author", "actor", "vendor", "supplier", "beneficiary"):
-        v = obj.get(k)
+        v = _get_ci(obj, lower_map, k)
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            continue
         if v is not None and str(v).strip() != "":
-            sender = str(v).strip()
+            sender = sanitize_utf8_str(str(v).strip())
             break
 
     compose_ts = None
     for k in ("composetime", "ts", "t", "timestamp", "created_at", "issued_at", "date"):
-        if obj.get(k) not in (None, ""):
-            compose_ts = obj.get(k)
+        cand = _clean_ts_field(_get_ci(obj, lower_map, k))
+        if cand not in (None, ""):
+            compose_ts = cand
             break
 
-    del_ts = (
-        props.get("deletetime")
-        or obj.get("deletetime")
-        or obj.get("deleted_ts")
-        or obj.get("deleted_at")
-        or obj.get("retracted_at")
-        or ("true" if obj.get("subtype") == "message_deleted" or obj.get("is_deleted") is True else None)
+    del_ts = _clean_ts_field(
+        _get_ci(props, props_low, "deletetime")
+        or _get_ci(obj, lower_map, "deletetime")
+        or _get_ci(obj, lower_map, "deleted_ts")
+        or _get_ci(obj, lower_map, "deleted_at")
+        or _get_ci(obj, lower_map, "retracted_at")
+        or (
+            "true"
+            if _get_ci(obj, lower_map, "subtype") == "message_deleted" or _get_ci(obj, lower_map, "is_deleted") is True
+            else None
+        )
     )
-    edit_ts = (
-        props.get("edittime")
-        or obj.get("edittime")
-        or edited_sub.get("ts")
-        or obj.get("edited_at")
-        or obj.get("updated_at")
+    edit_ts = _clean_ts_field(
+        _get_ci(props, props_low, "edittime")
+        or _get_ci(obj, lower_map, "edittime")
+        or _get_ci(edited_sub, edited_low, "ts")
+        or _get_ci(obj, lower_map, "edited_at")
+        or _get_ci(obj, lower_map, "updated_at")
     )
 
     if schema_tag == "chatsvc":
-        content_str = str(obj.get("content", ""))
+        raw_c = _get_ci(obj, lower_map, "content", "")
+        if raw_c is None or (isinstance(raw_c, float) and (math.isnan(raw_c) or math.isinf(raw_c))):
+            content_str = ""
+        else:
+            content_str = sanitize_utf8_str(str(raw_c))
     else:
         primary_parts: List[str] = []
         for k in ("content", "text", "body", "message", "payment_instructions", "memo", "note", "description"):
-            v = obj.get(k)
+            v = _get_ci(obj, lower_map, k)
             if isinstance(v, str) and v.strip():
-                primary_parts.append(v.strip())
+                primary_parts.append(sanitize_utf8_str(v.strip()))
         # Append structured banking/routing fields if present outside free-text body
-        for k in ("beneficiary", "payee", "iban", "beneficiary_iban", "sort_code", "account_number", "swift", "bic", "amount"):
-            v = obj.get(k)
+        for k in (
+            "beneficiary",
+            "payee",
+            "iban",
+            "beneficiary_iban",
+            "sort_code",
+            "account_number",
+            "routing_number",
+            "swift",
+            "bic",
+            "amount",
+            "total_due",
+            "payment_ref",
+        ):
+            v = _get_ci(obj, lower_map, k)
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                continue
             if v is not None and str(v).strip():
-                primary_parts.append(f"{k}={str(v).strip()}")
+                primary_parts.append(f"{k}={sanitize_utf8_str(str(v).strip())}")
         if primary_parts:
             content_str = " | ".join(primary_parts)
         else:
-            content_str = " | ".join(_collect_string_scalars(obj))
+            content_str = sanitize_utf8_str(" | ".join(_collect_string_scalars(obj)))
 
     return {
         "message_id": msg_id,
@@ -492,45 +672,158 @@ def normalize_carved_record_fields(obj: Dict[str, Any], schema_tag: str) -> Dict
     }
 
 
+class _CarveIntLimitError(ValueError):
+    """Raised when a JSON integer token inside a carved slice exceeds `MAX_JSON_INT_DIGITS`."""
+
+
+def _bounded_carve_int(num_str: str) -> int:
+    if len(num_str.lstrip("+-")) > MAX_JSON_INT_DIGITS:
+        raise _CarveIntLimitError("JSON integer exceeds bounded 64-digit safety limit")
+    return int(num_str)
+
+
 def _extract_json_objects_from_bytes(
     raw_val: bytes,
     schema_mode: str = "auto",
 ) -> List[Tuple[Dict[str, Any], str]]:
     """
-    Scan UTF-8 (and UTF-16LE if NUL bytes exist) using `json.JSONDecoder.raw_decode`.
-    Advances past the full span of each decoded top-level JSON object so nested child
-    objects (e.g., `properties: {deletetime: ...}`) are NEVER mis-carved as standalone records.
+    Linear O(N) UTF-8 / UTF-16LE JSON object carver with bounded integers and surrogate isolation.
+
+    Searches only candidate `{ "..."` object starts (`_JSON_OBJ_START_RE`) so bare `{` floods take
+    O(N) without invoking `raw_decode`, walks decoded outer container dicts iteratively without
+    double-carving inner `properties` sub-dicts, and recovers maximal balanced `{...}` spans from
+    truncated or poison-prefixed wrappers without quadratic retries.
     """
     candidates: List[str] = [raw_val.decode("utf-8", errors="ignore")]
     if b"\x00" in raw_val:
         candidates.append(raw_val.decode("utf-16-le", errors="ignore"))
 
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(parse_int=_bounded_carve_int)
     found: List[Tuple[Dict[str, Any], str]] = []
-    seen_hashes = set()
+    seen_hashes: set[str] = set()
+
+    def _ingest_decoded_value(root_val: Any) -> None:
+        work: List[Any] = [root_val]
+        while work:
+            cur = work.pop()
+            if isinstance(cur, dict):
+                schema_tag = classify_carved_json_object(cur, schema_mode=schema_mode)
+                if schema_tag is not None:
+                    clean_obj = sanitize_json_value(cur)
+                    canonical = json.dumps(clean_obj, sort_keys=True, ensure_ascii=False, allow_nan=False)
+                    h = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                    if h not in seen_hashes:
+                        seen_hashes.add(h)
+                        found.append((clean_obj, schema_tag))
+                else:
+                    vals = list(cur.values())
+                    for v in reversed(vals):
+                        if isinstance(v, (dict, list)):
+                            work.append(v)
+            elif isinstance(cur, list):
+                for item in reversed(cur):
+                    if isinstance(item, (dict, list)):
+                        work.append(item)
 
     for text in candidates:
         pos = 0
         n = len(text)
+        max_retry_fail_pos = -1
+
         while pos < n:
-            brace_idx = text.find("{", pos)
-            if brace_idx == -1:
+            m_start = _JSON_OBJ_START_RE.search(text, pos)
+            if m_start is None:
                 break
+            brace_idx = m_start.start()
+            is_bigint_abort = False
             try:
                 obj, end_idx = decoder.raw_decode(text, brace_idx)
-            except json.JSONDecodeError:
-                pos = brace_idx + 1
+                pos = max(end_idx, brace_idx + 1)
+                _ingest_decoded_value(obj)
                 continue
+            except json.JSONDecodeError as exc:
+                fail_limit = min(n, max(brace_idx + 1, exc.pos))
+                is_hard_abort = False
+            except _CarveIntLimitError:
+                fail_limit = n
+                is_hard_abort = True
+                is_bigint_abort = True
+            except (RecursionError, ValueError):
+                fail_limit = n
+                is_hard_abort = True
 
-            # Advance past the entire top-level JSON object so nested dicts are skipped
-            pos = max(end_idx, brace_idx + 1)
-            schema_tag = classify_carved_json_object(obj, schema_mode=schema_mode)
-            if schema_tag is not None:
-                canonical = json.dumps(obj, sort_keys=True, ensure_ascii=False)
-                h = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-                if h not in seen_hashes:
-                    seen_hashes.add(h)
-                    found.append((obj, schema_tag))
+            # Single-pass scan over `[brace_idx + 1, fail_limit)` collecting disjoint maximal closed `{...}` spans
+            stack: List[Tuple[int, List[Any], int]] = [(brace_idx, [], 1)]
+            root_closed_children: List[Any] = []
+            last_str_brace: int | None = None
+            last_str_end = -1
+            early_next: int | None = None
+
+            for m in _JSON_CARVE_SCAN_RE.finditer(text, brace_idx + 1, fail_limit):
+                ms, me = m.start(), m.end()
+                ch = text[ms]
+                if ch == '"':
+                    if me - ms >= 2:
+                        b_in = text.find("{", ms + 1, me - 1)
+                        if b_in != -1:
+                            last_str_brace = b_in
+                            last_str_end = me
+                    else:
+                        if is_hard_abort:
+                            early_next = ms + 1
+                        break
+                elif ch == "{":
+                    stack.append((ms, [], 1))
+                elif ch == "}":
+                    if stack:
+                        open_pos, cur_children, cur_height = stack.pop()
+                        if not stack:
+                            root_closed_children.extend(cur_children)
+                            early_next = me
+                            break
+                        p_pos, p_children, p_height = stack[-1]
+                        p_children.append((open_pos, me, cur_children, cur_height))
+                        if cur_height + 1 > p_height:
+                            stack[-1] = (p_pos, p_children, cur_height + 1)
+                else:
+                    # Matched unquoted 65+-digit integer token
+                    if is_bigint_abort:
+                        early_next = me
+                        break
+
+            pending_spans: List[Any] = list(root_closed_children)
+            for _f_pos, f_children, _f_h in stack:
+                pending_spans.extend(f_children)
+
+            span_stack: List[Any] = list(reversed(pending_spans))
+            while span_stack:
+                s_lo, s_hi, s_children, s_height = span_stack.pop()
+                if (s_hi - s_lo) < 10:
+                    continue
+                if s_height > MAX_CARVE_DECODE_HEIGHT:
+                    span_stack.extend(reversed(s_children))
+                    continue
+                try:
+                    sub_obj, sub_end = decoder.raw_decode(text, s_lo)
+                    if sub_end <= s_hi:
+                        _ingest_decoded_value(sub_obj)
+                    else:
+                        span_stack.extend(reversed(s_children))
+                except (json.JSONDecodeError, RecursionError, ValueError):
+                    span_stack.extend(reversed(s_children))
+
+            if early_next is not None:
+                pos = max(brace_idx + 1, early_next)
+            elif (
+                not is_hard_abort
+                and last_str_brace is not None
+                and (fail_limit - last_str_end) <= 4
+                and fail_limit > max_retry_fail_pos
+            ):
+                max_retry_fail_pos = fail_limit
+                pos = max(brace_idx + 1, last_str_brace)
+            else:
+                pos = max(brace_idx + 1, fail_limit)
 
     return found
 
@@ -543,8 +836,15 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
     total_len = len(raw_bytes)
     physical_records_ok = 0
     corrupted_records: List[Dict[str, Any]] = []
+    corrupted_total_count = 0
     recovered_entries: List[Dict[str, Any]] = []
     stats: Dict[str, int] = {"value_ops_total": 0, "blink_v8_binary_only_values": 0}
+
+    def add_corrupted(entry: Dict[str, Any]) -> None:
+        nonlocal corrupted_total_count
+        corrupted_total_count += 1
+        if len(corrupted_records) < MAX_CORRUPTED_RECORDS_REPORTED:
+            corrupted_records.append(entry)
 
     frag_buf = bytearray()
     frag_start_offset: int | None = None
@@ -559,8 +859,8 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
             stored_crc, length, rec_type = struct.unpack_from("<IHB", raw_bytes, pos)
             if stored_crc == 0 and length == 0 and rec_type == REC_ZERO:
                 rem = raw_bytes[pos:block_end]
-                if any(b != 0 for b in rem):
-                    corrupted_records.append(
+                if rem.count(0) != len(rem):
+                    add_corrupted(
                         {
                             "byte_offset": pos,
                             "reason": "Non-zero bytes following zero-header preallocation region in 32KiB block",
@@ -573,7 +873,7 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
             data_start = pos + HEADER_SIZE
             data_end = data_start + length
             if data_end > block_end:
-                corrupted_records.append(
+                add_corrupted(
                     {
                         "byte_offset": rec_offset,
                         "reason": "Record length exceeds 32KiB LevelDB block boundary or truncated EOF",
@@ -589,7 +889,7 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
 
             expected_masked = mask_crc32c(crc32c(bytes([rec_type]) + chunk))
             if stored_crc != expected_masked:
-                corrupted_records.append(
+                add_corrupted(
                     {
                         "byte_offset": rec_offset,
                         "record_type": rec_type,
@@ -604,7 +904,7 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
 
             if rec_type == REC_FULL:
                 if frag_start_offset is not None:
-                    corrupted_records.append(
+                    add_corrupted(
                         {
                             "byte_offset": frag_start_offset,
                             "reason": "Unclosed FIRST/MIDDLE fragmented record interrupted by FULL record",
@@ -616,7 +916,7 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
                 logical_offset = rec_offset
             elif rec_type == REC_FIRST:
                 if frag_start_offset is not None:
-                    corrupted_records.append(
+                    add_corrupted(
                         {
                             "byte_offset": frag_start_offset,
                             "reason": "Unclosed FIRST/MIDDLE fragmented record interrupted by new FIRST record",
@@ -627,12 +927,10 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
                 continue
             elif rec_type == REC_MIDDLE:
                 if frag_start_offset is None:
-                    corrupted_records.append(
-                        {"byte_offset": rec_offset, "reason": "Orphan MIDDLE fragment without FIRST"}
-                    )
+                    add_corrupted({"byte_offset": rec_offset, "reason": "Orphan MIDDLE fragment without FIRST"})
                     continue
                 if len(frag_buf) + len(chunk) > MAX_LOGICAL_RECORD_BYTES:
-                    corrupted_records.append(
+                    add_corrupted(
                         {"byte_offset": frag_start_offset, "reason": "Fragmented record exceeds 32MiB safety limit"}
                     )
                     frag_buf.clear()
@@ -642,12 +940,10 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
                 continue
             elif rec_type == REC_LAST:
                 if frag_start_offset is None:
-                    corrupted_records.append(
-                        {"byte_offset": rec_offset, "reason": "Orphan LAST fragment without FIRST"}
-                    )
+                    add_corrupted({"byte_offset": rec_offset, "reason": "Orphan LAST fragment without FIRST"})
                     continue
                 if len(frag_buf) + len(chunk) > MAX_LOGICAL_RECORD_BYTES:
-                    corrupted_records.append(
+                    add_corrupted(
                         {"byte_offset": frag_start_offset, "reason": "Fragmented record exceeds 32MiB safety limit"}
                     )
                     frag_buf.clear()
@@ -659,26 +955,27 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
                 frag_buf.clear()
                 frag_start_offset = None
             else:
-                corrupted_records.append(
-                    {"byte_offset": rec_offset, "reason": f"Unknown LevelDB record type {rec_type}"}
-                )
+                add_corrupted({"byte_offset": rec_offset, "reason": f"Unknown LevelDB record type {rec_type}"})
                 frag_buf.clear()
                 frag_start_offset = None
                 continue
 
+            batch_corrupt: List[Dict[str, Any]] = []
             _decode_writebatch_into(
                 logical_bytes,
                 logical_offset,
                 recovered_entries,
-                corrupted_records,
+                batch_corrupt,
                 schema_mode=schema_mode,
                 stats=stats,
             )
+            for c_item in batch_corrupt:
+                add_corrupted(c_item)
 
         if pos < block_end:
             trailer = raw_bytes[pos:block_end]
-            if any(b != 0 for b in trailer):
-                corrupted_records.append(
+            if trailer.count(0) != len(trailer):
+                add_corrupted(
                     {
                         "byte_offset": pos,
                         "reason": f"Non-zero truncated header/trailer ({len(trailer)} bytes < 7-byte header)",
@@ -688,7 +985,7 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
         block_idx += 1
 
     if frag_start_offset is not None:
-        corrupted_records.append(
+        add_corrupted(
             {
                 "byte_offset": frag_start_offset,
                 "reason": "Truncated logical record: unclosed FIRST/MIDDLE fragment at EOF",
@@ -703,7 +1000,8 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
         "valid_physical_frames": physical_records_ok,
         "writebatch_value_ops_seen": stats["value_ops_total"],
         "blink_v8_non_json_values_skipped": stats["blink_v8_binary_only_values"],
-        "corrupted_frames_count": len(corrupted_records),
+        "corrupted_frames_count": corrupted_total_count,
+        "corrupted_frames_truncated": corrupted_total_count > MAX_CORRUPTED_RECORDS_REPORTED,
         "corrupted_frames": corrupted_records,
         "recovered_records_count": len(recovered_entries),
         "recovered_chatsvc_records_count": chatsvc_count,
@@ -820,6 +1118,24 @@ def _has_leveldb_sstable_magic(path: Path) -> bool:
             os.close(fd)
 
 
+def _has_sqlite3_magic(path: Path) -> bool:
+    """Verify the 16-byte SQLite 3 header magic (`b'SQLite format 3\\x00'`) at offset 0 via O_NOFOLLOW."""
+    fd = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(path), flags)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size < 16:
+            return False
+        head = os.read(fd, 16)
+        return head == SQLITE3_HEADER_MAGIC
+    except OSError:
+        return False
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def inspect_chromium_storage_path(
     target: Path,
     max_mb: int = 64,
@@ -847,21 +1163,57 @@ def inspect_chromium_storage_path(
 
     log_files: List[Path] = []
     ldb_files: List[Path] = []
+    non_regular_sstable_entries = 0
+    unreadable_or_symlink_logs = 0
     blob_files_count = 0
+    sqlite_files_count = 0
     scanned_files = 0
     scan_truncated = False
 
+    def _is_sqlite_artifact(name_lower: str, suffix_lower: str) -> bool:
+        return (
+            suffix_lower in (".sqlite", ".sqlite3")
+            or name_lower.endswith(("-wal", "-shm", ".sqlite-wal", ".sqlite3-wal"))
+        )
+
     if stat.S_ISREG(target_st.st_mode):
         suf = target.suffix.lower()
+        name_low = target.name.lower()
         if suf == ".log":
             log_files.append(target)
         elif suf in (".ldb", ".sst"):
             ldb_files.append(target)
+        elif _is_sqlite_artifact(name_low, suf) or (
+            suf in (".db", ".db3", ".vscdb", ".sdb") and _has_sqlite3_magic(target)
+        ):
+            sqlite_files_count += 1
     elif stat.S_ISDIR(target_st.st_mode):
+        target_is_blob_dir = target.name.lower().endswith(".blob")
         for dirpath, dirnames, filenames in os.walk(target, followlinks=False):
             dirnames.sort()
             filenames.sort()
-            parent_lower = dirpath.lower()
+            try:
+                rel_parts = Path(dirpath).relative_to(target).parts
+            except ValueError:
+                rel_parts = ()
+            in_blob_subdir = target_is_blob_dir or any(pt.lower().endswith(".blob") for pt in rel_parts)
+
+            for dname in list(dirnames):
+                if scanned_files >= MAX_PRECHECK_SCAN_FILES:
+                    scan_truncated = True
+                    break
+                scanned_files += 1
+                dlow = dname.lower()
+                dsuf = Path(dname).suffix.lower()
+                if dsuf in (".ldb", ".sst"):
+                    non_regular_sstable_entries += 1
+                elif dsuf == ".blob" or dlow.endswith(".blob"):
+                    blob_files_count += 1
+                elif _is_sqlite_artifact(dlow, dsuf):
+                    sqlite_files_count += 1
+            if scan_truncated:
+                break
+
             for fname in filenames:
                 if scanned_files >= MAX_PRECHECK_SCAN_FILES:
                     scan_truncated = True
@@ -871,16 +1223,29 @@ def inspect_chromium_storage_path(
                     pst = os.lstat(p)
                 except OSError:
                     continue
-                if not stat.S_ISREG(pst.st_mode):
-                    continue
                 scanned_files += 1
                 suf = p.suffix.lower()
+                name_low = fname.lower()
+                if not stat.S_ISREG(pst.st_mode):
+                    if suf == ".log":
+                        unreadable_or_symlink_logs += 1
+                    elif suf in (".ldb", ".sst"):
+                        non_regular_sstable_entries += 1
+                    elif in_blob_subdir or suf == ".blob":
+                        blob_files_count += 1
+                    elif _is_sqlite_artifact(name_low, suf):
+                        sqlite_files_count += 1
+                    continue
                 if suf == ".log":
                     log_files.append(p)
                 elif suf in (".ldb", ".sst"):
                     ldb_files.append(p)
-                elif ".blob" in parent_lower or suf == ".blob":
+                elif in_blob_subdir or suf == ".blob":
                     blob_files_count += 1
+                elif _is_sqlite_artifact(name_low, suf) or (
+                    suf in (".db", ".db3", ".vscdb", ".sdb") and _has_sqlite3_magic(p)
+                ):
+                    sqlite_files_count += 1
             if scan_truncated:
                 break
     else:
@@ -902,6 +1267,7 @@ def inspect_chromium_storage_path(
             oversize_logs_skipped += 1
             continue
         except OSError:
+            unreadable_or_symlink_logs += 1
             continue
         if not raw_log:
             continue
@@ -916,12 +1282,16 @@ def inspect_chromium_storage_path(
                 soft_deleted_records += 1
 
     verified_sstables = sum(1 for f in ldb_files if _has_leveldb_sstable_magic(f))
+    total_sstables_detected = len(ldb_files) + non_regular_sstable_entries
 
     if (
         carvable_records > 0
-        and len(ldb_files) == 0
+        and total_sstables_detected == 0
         and v8_binary_only_values == 0
         and blob_files_count == 0
+        and sqlite_files_count == 0
+        and oversize_logs_skipped == 0
+        and unreadable_or_symlink_logs == 0
         and not scan_truncated
     ):
         verdict = "GO"
@@ -933,16 +1303,18 @@ def inspect_chromium_storage_path(
         verdict = "PARTIAL"
         guidance = (
             "Carvable JSON records are recoverable from uncompacted .log frames, alongside compacted "
-            f".ldb SSTables, external .blob files, binary-only Blink V8 values, or capped directory scans that fall outside v{__version__} scope."
+            ".ldb SSTables, external .blob entries, co-located SQLite storage files, binary-only Blink V8 "
+            f"values, oversize logs, or capped directory scans that fall outside v{__version__} scope."
         )
     else:
         verdict = "NO_GO_COMPACTED_OR_UNSUPPORTED"
         guidance = (
             "Zero carvable JSON records found in uncompacted .log files (storage may already be compacted "
-            "into Snappy .ldb SSTables, encoded solely in binary Blink V8 StructuredClone, backed by newly "
-            "created Chrome 156+ SQLite IndexedDB while existing LevelDB stores remain in LevelDB, or empty). "
-            "For compacted .ldb SSTables or binary Blink IndexedDB stores, use full LevelDB/Blink parsers "
-            "such as dfindexeddb or ccl_chromium_reader; for SQLite-backed stores, inspect with sqlite3."
+            "into Snappy .ldb SSTables, encoded solely in binary Blink V8 StructuredClone, backed by "
+            "co-located SQLite storage files such as newly created Chrome 156+ SQLite IndexedDB while "
+            "existing LevelDB stores remain in LevelDB, or empty). For compacted .ldb SSTables or binary "
+            "Blink IndexedDB stores, use full LevelDB/Blink parsers such as dfindexeddb or "
+            "ccl_chromium_reader; for SQLite-backed stores, inspect with sqlite3."
         )
 
     return {
@@ -958,9 +1330,10 @@ def inspect_chromium_storage_path(
         "carvable_json_records_count": carvable_records,
         "soft_deleted_json_records_count": soft_deleted_records,
         "schemas_detected_counts": schemas_seen,
-        "compacted_sstable_files_detected": len(ldb_files),
+        "compacted_sstable_files_detected": total_sstables_detected,
         "verified_leveldb_sstables_count": verified_sstables,
         "indexeddb_blob_files_detected": blob_files_count,
+        "sqlite_files_detected": sqlite_files_count,
         "blink_v8_non_json_values_detected": v8_binary_only_values,
         "intake_guidance": guidance,
     }

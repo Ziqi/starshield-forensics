@@ -300,14 +300,20 @@ class TestV0310Regressions(unittest.TestCase):
         self.assertEqual(res3["incremental_revision_count"], 2)
         self.assertTrue(res3["has_multiple_revisions"])
 
-        # 4. Adversarial unclosed '(' injected between revisions flags unterminated string & trailer mismatch
+        # 4. Adversarial unclosed '(' injected between revisions flags unterminated string,
+        # and an unclosed `startxref` without `%%EOF` flags structural trailer mismatch
         first_eof_end = two_rev.index(b"%%EOF\n") + 6
         adv_unclosed_rev = two_rev[:first_eof_end] + b"(\n" + two_rev[first_eof_end:]
         res4 = inspect_pdf_container(adv_unclosed_rev, "adv_unclosed_rev.pdf")
         self.assertFalse(res4["valid_container"])
         err_reasons = " | ".join(e["reason"] for e in res4["container_errors"])
         self.assertIn("Unterminated PDF literal string", err_reasons)
-        self.assertIn("Structural trailer mismatch", err_reasons)
+
+        adv_extra_startxref = two_rev + b"startxref\n0\n"
+        res4b = inspect_pdf_container(adv_extra_startxref, "adv_extra_startxref.pdf")
+        self.assertFalse(res4b["valid_container"])
+        err_reasons_b = " | ".join(e["reason"] for e in res4b["container_errors"])
+        self.assertIn("Structural trailer mismatch", err_reasons_b)
 
     def test_06_writebatch_per_operation_sequence_numbers_with_tombstone(self) -> None:
         m1 = json.dumps({"id": "m1", "from": "8:live:u1", "composetime": "2025-03-18T10:00:00Z", "content": "a"}).encode(

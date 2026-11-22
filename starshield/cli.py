@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2026 Ziqi Xiao
 # SPDX-License-Identifier: MIT
 """
-StarShield Forensics CLI v0.3.10 (`starshield`)
+StarShield Forensics CLI v0.3.11 (`starshield`)
 Author: Ziqi Xiao (@Ziqi)
 License: MIT
 
@@ -26,8 +26,11 @@ import hmac
 import html
 import importlib.resources
 import json
+import math
+import os
 import re
 import secrets
+import stat
 import statistics
 import sys
 from datetime import datetime, timezone
@@ -58,11 +61,14 @@ from starshield.leveldb_log import (
     SafeDiagnosticError,
     build_writebatch,
     classify_carved_json_object,
+    dumps_strict_json,
     encode_logical_record_across_blocks,
     inspect_chromium_storage_path,
     normalize_carved_record_fields,
     parse_leveldb_wal,
     read_bounded_bytes,
+    sanitize_json_value,
+    sanitize_utf8_str,
 )
 from starshield.pdf_containers import (
     apply_pdf_redaction,
@@ -103,7 +109,7 @@ def redact_msg_id(msg_id: str, salt: bytes) -> str:
     """Keyed per-run HMAC message token with configurable digest agility."""
     if not msg_id:
         return ""
-    digest = hmac.new(salt, msg_id.encode("utf-8"), get_active_hmac_callable()).hexdigest()[:12]
+    digest = hmac.new(salt, sanitize_utf8_str(msg_id).encode("utf-8"), get_active_hmac_callable()).hexdigest()[:12]
     return f"msg_hmac_{digest}"
 
 
@@ -167,7 +173,8 @@ def format_masked_error(exc: BaseException) -> str:
 def strip_markup(raw: str) -> str:
     if not raw:
         return ""
-    cleaned = re.sub(r"<br\s*/?>", "\n", str(raw), flags=re.IGNORECASE)
+    cleaned = sanitize_utf8_str(str(raw))
+    cleaned = re.sub(r"<br\s*/?>", "\n", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<[^<>]{0,4096}>", " ", cleaned)
     cleaned = html.unescape(cleaned)
     return re.sub(r"[ \t]+", " ", cleaned).strip()
@@ -175,26 +182,32 @@ def strip_markup(raw: str) -> str:
 
 def parse_strict_utc_ts(ts: Any) -> float | None:
     """Parse epoch ms/s or explicit timezone-aware ISO-8601. Rejects naive local timestamps."""
-    if ts is None or ts == "" or isinstance(ts, bool):
-        return None
-    if isinstance(ts, (int, float)):
-        val = float(ts)
-        if not (-1e16 < val < 1e16):
-            return None
-        return val / 1000.0 if val > 1e11 else val
-    s = str(ts).strip()
-    if len(s) <= 64 and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", s):
-        val = float(s)
-        if not (-1e16 < val < 1e16):
-            return None
-        return val / 1000.0 if val > 1e11 else val
     try:
+        if ts is None or ts == "" or isinstance(ts, bool):
+            return None
+        if isinstance(ts, int):
+            if not (-10**16 < ts < 10**16):
+                return None
+            val = float(ts)
+            return val / 1000.0 if abs(val) > 1e11 else val
+        if isinstance(ts, float):
+            if math.isnan(ts) or math.isinf(ts) or not (-1e16 < ts < 1e16):
+                return None
+            return ts / 1000.0 if abs(ts) > 1e11 else ts
+        s = str(ts).strip()
+        if not s or len(s) > 128:
+            return None
+        if len(s) <= 64 and re.fullmatch(r"[+-]?[0-9]+(?:\.[0-9]+)?", s):
+            val = float(s)
+            if math.isnan(val) or math.isinf(val) or not (-1e16 < val < 1e16):
+                return None
+            return val / 1000.0 if abs(val) > 1e11 else val
         normalized = s.replace("Z", "+00:00")
         dt = datetime.fromisoformat(normalized)
         if dt.tzinfo is None:
             return None
         return dt.astimezone(timezone.utc).timestamp()
-    except (ValueError, OverflowError, OSError):
+    except (ValueError, OverflowError, OSError, TypeError):
         return None
 
 
@@ -625,9 +638,31 @@ def build_demo_report(redact: bool = True, salt: bytes | None = None) -> Dict[st
     }
 
 
+def _guard_vault_not_same_file(vault_file: Path | None, input_file: Path | None) -> None:
+    """Reject `--vault-file` if it is a symlink or points to the same filesystem inode as an input artifact."""
+    if vault_file is None:
+        return
+    try:
+        st_v = os.lstat(vault_file)
+    except OSError:
+        return
+    if stat.S_ISLNK(st_v.st_mode):
+        raise OSError("Refusing to write token vault through a symbolic link")
+    if input_file is None:
+        return
+    try:
+        st_i = os.lstat(input_file)
+    except OSError:
+        return
+    if os.path.samestat(st_v, st_i):
+        raise SafeDiagnosticError(
+            "Refusing to overwrite existing file: target is not a valid starshield-token-vault/v1 file"
+        )
+
+
 def run_demo(redact: bool = True, salt: bytes | None = None) -> int:
     report = build_demo_report(redact=redact, salt=salt)
-    print(json.dumps(report, indent=2, ensure_ascii=False))
+    print(dumps_strict_json(report, indent=2))
     return 0
 
 
@@ -754,6 +789,7 @@ def main(argv: List[str] | None = None) -> int:
 
     try:
         if args.hmac_key_file is not None:
+            _guard_vault_not_same_file(args.vault_file, args.hmac_key_file)
             raw_key = read_bounded_bytes(args.hmac_key_file, max_mb=1, redact=redact).strip()
             if len(raw_key) < 16:
                 raise SafeDiagnosticError("External --hmac-key-file must contain at least 16 secret bytes")
@@ -765,16 +801,18 @@ def main(argv: List[str] | None = None) -> int:
             return run_demo(redact=redact, salt=run_salt)
 
         if args.command == "precheck":
+            _guard_vault_not_same_file(args.vault_file, args.target_path)
             pre_report = inspect_chromium_storage_path(
                 args.target_path,
                 max_mb=args.max_mb,
                 schema_mode=args.schema,
                 redact=redact,
             )
-            print(json.dumps({"precheck_manifest": pre_report}, indent=2, ensure_ascii=False))
+            print(dumps_strict_json({"precheck_manifest": pre_report}, indent=2))
             return 0
 
         if args.command == "parse-leveldb-log":
+            _guard_vault_not_same_file(args.vault_file, args.log_file)
             raw = read_bounded_bytes(args.log_file, args.max_mb, redact=redact)
             parsed = apply_wal_record_redaction(
                 parse_leveldb_wal(raw, schema_mode=args.schema),
@@ -792,12 +830,15 @@ def main(argv: List[str] | None = None) -> int:
                 out["pseudonym_session_id"] = pseudo.session_id
                 out["pseudonym_session_tag"] = pseudo.session_tag
                 out["pseudonym_token_counts"] = pseudo.token_counts()
-            print(json.dumps(out, indent=2, ensure_ascii=False))
+                if pseudo.cap_exceeded_categories():
+                    out["pseudonym_cap_exceeded_categories"] = pseudo.cap_exceeded_categories()
+            print(dumps_strict_json(out, indent=2))
             return 0
 
         if args.command == "triage-json":
+            _guard_vault_not_same_file(args.vault_file, args.json_file)
             raw = read_bounded_bytes(args.json_file, args.max_mb, redact=redact)
-            data = json.loads(raw.decode("utf-8"), parse_int=_parse_bounded_json_int)
+            data = sanitize_json_value(json.loads(raw.decode("utf-8"), parse_int=_parse_bounded_json_int))
             triaged = triage_exported_chatsvc_json(
                 data,
                 redact=redact,
@@ -815,20 +856,24 @@ def main(argv: List[str] | None = None) -> int:
                 out["pseudonym_session_id"] = pseudo.session_id
                 out["pseudonym_session_tag"] = pseudo.session_tag
                 out["pseudonym_token_counts"] = pseudo.token_counts()
-            print(json.dumps(out, indent=2, ensure_ascii=False))
+                if pseudo.cap_exceeded_categories():
+                    out["pseudonym_cap_exceeded_categories"] = pseudo.cap_exceeded_categories()
+            print(dumps_strict_json(out, indent=2))
             return 0
 
         if args.command == "corroborate-timestamps":
+            _guard_vault_not_same_file(args.vault_file, args.json_file)
             raw = read_bounded_bytes(args.json_file, args.max_mb, redact=redact)
-            data = json.loads(raw.decode("utf-8"), parse_int=_parse_bounded_json_int)
+            data = sanitize_json_value(json.loads(raw.decode("utf-8"), parse_int=_parse_bounded_json_int))
             out = {
                 "acquisition_manifest": build_acquisition_manifest(raw, args.json_file.name, redact=redact),
                 "corroboration": corroborate_timestamps(data, redact=redact, salt=run_salt),
             }
-            print(json.dumps(out, indent=2, ensure_ascii=False))
+            print(dumps_strict_json(out, indent=2))
             return 0
 
         if args.command == "inspect-image":
+            _guard_vault_not_same_file(args.vault_file, args.image_file)
             raw = read_bounded_bytes(args.image_file, args.max_mb, redact=redact)
             label = "[REDACTED_IMAGE_LABEL]" if redact else args.image_file.name
             out = {
@@ -839,10 +884,11 @@ def main(argv: List[str] | None = None) -> int:
                     salt=run_salt,
                 ),
             }
-            print(json.dumps(out, indent=2, ensure_ascii=False))
+            print(dumps_strict_json(out, indent=2))
             return 0
 
         if args.command == "inspect-pdf":
+            _guard_vault_not_same_file(args.vault_file, args.pdf_file)
             raw = read_bounded_bytes(args.pdf_file, args.max_mb, redact=redact)
             label = "[REDACTED_PDF_LABEL]" if redact else args.pdf_file.name
             out = {
@@ -853,31 +899,33 @@ def main(argv: List[str] | None = None) -> int:
                     salt=run_salt,
                 ),
             }
-            print(json.dumps(out, indent=2, ensure_ascii=False))
+            print(dumps_strict_json(out, indent=2))
             return 0
 
         if args.command == "summarize-linguistics":
+            _guard_vault_not_same_file(args.vault_file, args.json_file)
             raw = read_bounded_bytes(args.json_file, args.max_mb, redact=redact)
-            data = json.loads(raw.decode("utf-8"), parse_int=_parse_bounded_json_int)
+            data = sanitize_json_value(json.loads(raw.decode("utf-8"), parse_int=_parse_bounded_json_int))
             out = {
                 "acquisition_manifest": build_acquisition_manifest(raw, args.json_file.name, redact=redact),
                 "descriptive_linguistics": summarize_corpus_linguistics(data),
             }
-            print(json.dumps(out, indent=2, ensure_ascii=False))
+            print(dumps_strict_json(out, indent=2))
             return 0
 
         if args.command == "detokenize":
+            _guard_vault_not_same_file(args.vault_file, args.input)
             mapping, vault_tag = load_vault_strict(args.vault)
             if args.text is not None:
-                src_text = args.text
+                src_text = sanitize_utf8_str(args.text)
             elif args.input is not None:
-                src_text = read_bounded_bytes(args.input, args.max_mb, redact=False).decode("utf-8")
+                src_text = sanitize_utf8_str(read_bounded_bytes(args.input, args.max_mb, redact=redact).decode("utf-8"))
             else:
                 limit_b = int(args.max_mb) * 1024 * 1024
                 raw_in = sys.stdin.buffer.read(limit_b + 1)
                 if len(raw_in) > limit_b:
                     raise SafeDiagnosticError(f"Stdin exceeds --max-mb={int(args.max_mb)} safety limit")
-                src_text = raw_in.decode("utf-8")
+                src_text = sanitize_utf8_str(raw_in.decode("utf-8"))
             restored, count, unmatched = detokenize_text(
                 src_text,
                 mapping,
@@ -895,13 +943,13 @@ def main(argv: List[str] | None = None) -> int:
                     f"Left {len(unmatched)} placeholder(s) unexpanded because their 4-hex session tag "
                     f"did not match vault session_tag '{vault_tag}' or was absent from vault."
                 )
-            print(json.dumps(detok_out, indent=2, ensure_ascii=False))
+            print(dumps_strict_json(detok_out, indent=2))
             return 0
 
         if args.command == "shred-vault":
             shred_report = shred_vault_file(args.vault)
             shred_report["tool_version"] = f"starshield-forensics/{__version__}"
-            print(json.dumps(shred_report, indent=2, ensure_ascii=False))
+            print(dumps_strict_json(shred_report, indent=2))
             return 0
 
         if args.command == "mcp":
@@ -925,7 +973,7 @@ def main(argv: List[str] | None = None) -> int:
     ) as exc:
         if redact:
             safe_msg = format_masked_error(exc)
-            sys.stderr.write(json.dumps({"error": safe_msg, "masked_mode": True}) + "\n")
+            sys.stderr.write(dumps_strict_json({"error": safe_msg, "masked_mode": True}, indent=None) + "\n")
         else:
             if isinstance(exc, RecursionError):
                 lab_msg = "Input exceeded maximum parser nesting depth"
@@ -933,14 +981,14 @@ def main(argv: List[str] | None = None) -> int:
                 lab_msg = "Input exceeded available memory bounds"
             else:
                 lab_msg = str(exc)
-            sys.stderr.write(json.dumps({"error": lab_msg, "masked_mode": False}) + "\n")
+            sys.stderr.write(dumps_strict_json({"error": lab_msg, "masked_mode": False}, indent=None) + "\n")
         return 2
     except Exception as exc:
         if redact:
             safe_msg = format_masked_error(exc)
-            sys.stderr.write(json.dumps({"error": safe_msg, "masked_mode": True}) + "\n")
+            sys.stderr.write(dumps_strict_json({"error": safe_msg, "masked_mode": True}, indent=None) + "\n")
         else:
-            sys.stderr.write(json.dumps({"error": str(exc), "masked_mode": False}) + "\n")
+            sys.stderr.write(dumps_strict_json({"error": str(exc), "masked_mode": False}, indent=None) + "\n")
         return 2
     finally:
         set_active_hmac_digest(prev_digest)

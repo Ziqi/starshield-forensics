@@ -31,6 +31,7 @@ JPEG_SOI = b"\xff\xd8"
 MAX_ICC_DECOMPRESSED_BYTES = 16 * 1024 * 1024  # 16 MiB single-chunk anti-zip-bomb limit
 MAX_TOTAL_ICC_DECOMPRESSED_BYTES = 32 * 1024 * 1024  # 32 MiB cumulative per-file anti-zip-bomb budget
 DECOMPRESS_STEP_BYTES = 64 * 1024  # 64 KiB incremental inflate step for mid-stream budget accounting
+MAX_IMAGE_ERRORS = 256  # Output-amplification cap on reported CRC / container error lists
 
 
 def _decompress_bounded_accounted(
@@ -92,13 +93,12 @@ def _decompress_bounded_accounted(
                 produced_total += len(tail)
 
         if not dobj.eof:
-            charged = produced_total if produced_total > 0 else min(DECOMPRESS_STEP_BYTES, max(1, total_in))
+            charged = produced_total if produced_total > 0 else DECOMPRESS_STEP_BYTES
             return "corrupt", charged, b"", "Incomplete or truncated zlib stream"
 
         return "ok", produced_total, b"".join(chunks), ""
     except zlib.error as exc:
-        in_flight = min(DECOMPRESS_STEP_BYTES, max(1, total_in))
-        return "corrupt", produced_total + in_flight, b"", str(exc)
+        return "corrupt", produced_total + DECOMPRESS_STEP_BYTES, b"", str(exc)
 
 
 def _decompress_bounded(comp_bytes: bytes, max_len: int = MAX_ICC_DECOMPRESSED_BYTES) -> bytes:
@@ -248,14 +248,30 @@ def inspect_image_container(raw: bytes, label: str = "artifact") -> Dict[str, An
 
 def _inspect_png(raw: bytes, label: str) -> Dict[str, Any]:
     pos = 8
-    chunks_summary: List[Dict[str, Any]] = []
+    chunks_count = 0
+    first_chunk_type: str | None = None
+    has_idat = False
     crc_errors: List[Dict[str, Any]] = []
+    crc_errors_total = 0
     container_errors: List[Dict[str, Any]] = []
+    container_errors_total = 0
     icc_profiles: List[Dict[str, Any]] = []
     text_software_tags: List[Dict[str, Any]] = []
     saw_iend = False
     total_icc_decompressed = 0
     icc_budget_exhausted = False
+
+    def add_crc_error(byte_offset: int, chunk_name: str, reason: str) -> None:
+        nonlocal crc_errors_total
+        crc_errors_total += 1
+        if len(crc_errors) < MAX_IMAGE_ERRORS:
+            crc_errors.append({"byte_offset": byte_offset, "chunk": chunk_name, "reason": reason})
+
+    def add_container_error(byte_offset: int, reason: str) -> None:
+        nonlocal container_errors_total
+        container_errors_total += 1
+        if len(container_errors) < MAX_IMAGE_ERRORS:
+            container_errors.append({"byte_offset": byte_offset, "reason": reason})
 
     while pos + 8 <= len(raw):
         chunk_offset = pos
@@ -267,7 +283,7 @@ def _inspect_png(raw: bytes, label: str) -> Dict[str, Any]:
         crc_end = data_end + 4
 
         if crc_end > len(raw):
-            crc_errors.append({"byte_offset": chunk_offset, "chunk": ctype, "reason": "Truncated PNG chunk"})
+            add_crc_error(chunk_offset, ctype, "Truncated PNG chunk")
             pos = len(raw)
             break
 
@@ -276,23 +292,25 @@ def _inspect_png(raw: bytes, label: str) -> Dict[str, Any]:
         calc_crc = zlib.crc32(ctype_bytes + chunk_data) & 0xFFFFFFFF
         crc_ok = stored_crc == calc_crc
 
-        chunks_summary.append({"chunk": ctype, "byte_offset": chunk_offset, "length": length, "crc_valid": crc_ok})
+        if chunks_count == 0:
+            first_chunk_type = ctype
+        chunks_count += 1
         if not crc_ok:
-            crc_errors.append(
-                {
-                    "byte_offset": chunk_offset,
-                    "chunk": ctype,
-                    "reason": f"CRC32 mismatch (stored=0x{stored_crc:08x}, calc=0x{calc_crc:08x})",
-                }
+            add_crc_error(
+                chunk_offset,
+                ctype,
+                f"CRC32 mismatch (stored=0x{stored_crc:08x}, calc=0x{calc_crc:08x})",
             )
         else:
-            if ctype_bytes == b"IHDR":
+            if ctype_bytes == b"IDAT":
+                has_idat = True
+            elif ctype_bytes == b"IHDR":
                 if length != 13:
-                    container_errors.append({"byte_offset": chunk_offset, "reason": f"Invalid IHDR length {length} != 13"})
+                    add_container_error(chunk_offset, f"Invalid IHDR length {length} != 13")
                 else:
                     w, h = struct.unpack_from(">II", chunk_data, 0)
                     if w == 0 or h == 0:
-                        container_errors.append({"byte_offset": chunk_offset, "reason": "IHDR zero width or height"})
+                        add_container_error(chunk_offset, "IHDR zero width or height")
             elif ctype_bytes == b"iCCP" and b"\x00" in chunk_data:
                 nul_idx = chunk_data.index(b"\x00")
                 prof_name = chunk_data[:nul_idx].decode("latin-1", errors="replace")
@@ -301,11 +319,9 @@ def _inspect_png(raw: bytes, label: str) -> Dict[str, Any]:
                     if remaining_icc < 0 or icc_budget_exhausted:
                         if not icc_budget_exhausted:
                             icc_budget_exhausted = True
-                            container_errors.append(
-                                {
-                                    "byte_offset": chunk_offset,
-                                    "reason": "Cumulative PNG iCCP decompression exceeded 32 MiB safety budget",
-                                }
+                            add_container_error(
+                                chunk_offset,
+                                "Cumulative PNG iCCP decompression exceeded 32 MiB safety budget",
                             )
                     else:
                         step_cap = min(MAX_ICC_DECOMPRESSED_BYTES, remaining_icc)
@@ -315,37 +331,34 @@ def _inspect_png(raw: bytes, label: str) -> Dict[str, Any]:
                         )
                         total_icc_decompressed += produced_bytes
                         if status == "ok":
-                            parsed_icc = _parse_icc_profile_bytes(decompressed, chunk_offset)
-                            parsed_icc["png_iccp_name"] = prof_name
-                            icc_profiles.append(parsed_icc)
+                            if len(icc_profiles) < MAX_IMAGE_ERRORS:
+                                parsed_icc = _parse_icc_profile_bytes(decompressed, chunk_offset)
+                                parsed_icc["png_iccp_name"] = prof_name
+                                icc_profiles.append(parsed_icc)
                         elif status == "limit":
                             if total_icc_decompressed > MAX_TOTAL_ICC_DECOMPRESSED_BYTES:
                                 if not icc_budget_exhausted:
                                     icc_budget_exhausted = True
-                                    container_errors.append(
-                                        {
-                                            "byte_offset": chunk_offset,
-                                            "reason": "Cumulative PNG iCCP decompression exceeded 32 MiB safety budget",
-                                        }
+                                    add_container_error(
+                                        chunk_offset,
+                                        "Cumulative PNG iCCP decompression exceeded 32 MiB safety budget",
                                     )
                             else:
-                                crc_errors.append(
-                                    {"byte_offset": chunk_offset, "chunk": "iCCP", "reason": f"zlib error: {err_msg}"}
-                                )
+                                add_crc_error(chunk_offset, "iCCP", f"zlib error: {err_msg}")
                         else:
-                            crc_errors.append(
-                                {"byte_offset": chunk_offset, "chunk": "iCCP", "reason": f"zlib error: {err_msg}"}
-                            )
+                            add_crc_error(chunk_offset, "iCCP", f"zlib error: {err_msg}")
                             if total_icc_decompressed > MAX_TOTAL_ICC_DECOMPRESSED_BYTES and not icc_budget_exhausted:
                                 icc_budget_exhausted = True
-                                container_errors.append(
-                                    {
-                                        "byte_offset": chunk_offset,
-                                        "reason": "Cumulative PNG iCCP decompression exceeded 32 MiB safety budget",
-                                    }
+                                add_container_error(
+                                    chunk_offset,
+                                    "Cumulative PNG iCCP decompression exceeded 32 MiB safety budget",
                                 )
-            elif ctype_bytes in (b"tEXt", b"iTXt") and any(
-                k in chunk_data for k in (b"Software", b"Creator", b"Author", b"Comment", b"Adobe", b"Photoshop")
+            elif (
+                ctype_bytes in (b"tEXt", b"iTXt")
+                and len(text_software_tags) < MAX_IMAGE_ERRORS
+                and any(
+                    k in chunk_data for k in (b"Software", b"Creator", b"Author", b"Comment", b"Adobe", b"Photoshop")
+                )
             ):
                 text_software_tags.append(
                     {
@@ -358,28 +371,31 @@ def _inspect_png(raw: bytes, label: str) -> Dict[str, Any]:
         pos = crc_end
         if ctype_bytes == b"IEND":
             if length != 0:
-                container_errors.append({"byte_offset": chunk_offset, "reason": f"Non-zero IEND length {length}"})
+                add_container_error(chunk_offset, f"Non-zero IEND length {length}")
             saw_iend = True
             break
 
-    if not chunks_summary or chunks_summary[0]["chunk"] != "IHDR":
-        container_errors.append({"byte_offset": 8, "reason": "Missing mandatory leading IHDR chunk"})
-    has_idat = any(c["chunk"] == "IDAT" and c["crc_valid"] for c in chunks_summary)
+    if chunks_count == 0 or first_chunk_type != "IHDR":
+        add_container_error(8, "Missing mandatory leading IHDR chunk")
     if not has_idat:
-        container_errors.append({"byte_offset": pos, "reason": "Missing mandatory IDAT image data chunk"})
+        add_container_error(pos, "Missing mandatory IDAT image data chunk")
     if not saw_iend:
-        container_errors.append({"byte_offset": pos, "reason": "Missing mandatory terminal IEND chunk (truncated PNG)"})
+        add_container_error(pos, "Missing mandatory terminal IEND chunk (truncated PNG)")
     elif pos < len(raw):
-        container_errors.append({"byte_offset": pos, "reason": f"Unexpected trailing bytes after IEND ({len(raw) - pos} bytes)"})
+        add_container_error(pos, f"Unexpected trailing bytes after IEND ({len(raw) - pos} bytes)")
 
-    valid_container = bool(chunks_summary) and has_idat and saw_iend and not crc_errors and not container_errors
+    valid_container = chunks_count > 0 and has_idat and saw_iend and crc_errors_total == 0 and container_errors_total == 0
     return {
         "artifact": label,
         "container_format": "PNG",
         "valid_container": valid_container,
         "epistemic_tier": "DERIVED",
-        "chunks_parsed": len(chunks_summary),
+        "chunks_parsed": chunks_count,
+        "crc_errors_count": crc_errors_total,
+        "crc_errors_truncated": crc_errors_total > MAX_IMAGE_ERRORS,
         "crc_errors": crc_errors,
+        "container_errors_count": container_errors_total,
+        "container_errors_truncated": container_errors_total > MAX_IMAGE_ERRORS,
         "container_errors": container_errors,
         "icc_profiles": icc_profiles,
         "software_text_chunks": text_software_tags,
@@ -415,12 +431,20 @@ def _scan_jpeg_entropy_until_marker(raw: bytes, start_pos: int) -> Tuple[int, in
 
 def _inspect_jpeg(raw: bytes, label: str) -> Dict[str, Any]:
     pos = 2
-    segments: List[Dict[str, Any]] = []
+    segments_count = 0
+    first_seg_offset: int | None = None
     container_errors: List[Dict[str, Any]] = []
+    container_errors_total = 0
     icc_profiles: List[Dict[str, Any]] = []
     icc_chunks: Dict[int, Tuple[int, int, bytes]] = {}
     icc_declared_total: int | None = None
     photoshop_8bim_offsets: List[int] = []
+
+    def add_jpeg_error(byte_offset: int, reason: str) -> None:
+        nonlocal container_errors_total
+        container_errors_total += 1
+        if len(container_errors) < MAX_IMAGE_ERRORS:
+            container_errors.append({"byte_offset": byte_offset, "reason": reason})
 
     saw_sof = False
     saw_sos = False
@@ -428,12 +452,12 @@ def _inspect_jpeg(raw: bytes, label: str) -> Dict[str, Any]:
 
     while pos < len(raw):
         if raw[pos] != 0xFF:
-            container_errors.append({"byte_offset": pos, "reason": "Expected 0xFF JPEG marker prefix"})
+            add_jpeg_error(pos, "Expected 0xFF JPEG marker prefix")
             break
         while pos < len(raw) and raw[pos] == 0xFF:
             pos += 1
         if pos >= len(raw):
-            container_errors.append({"byte_offset": pos - 1, "reason": "Truncated marker at EOF"})
+            add_jpeg_error(pos - 1, "Truncated marker at EOF")
             break
 
         marker = raw[pos]
@@ -441,56 +465,55 @@ def _inspect_jpeg(raw: bytes, label: str) -> Dict[str, Any]:
         pos += 1
 
         if marker == 0xD9:  # EOI
-            segments.append({"marker": "0xFFD9", "byte_offset": seg_offset, "length": 0})
+            if first_seg_offset is None:
+                first_seg_offset = seg_offset
+            segments_count += 1
             saw_eoi = True
             if pos < len(raw):
-                container_errors.append(
-                    {"byte_offset": pos, "reason": f"Trailing bytes after JPEG EOI ({len(raw) - pos} bytes)"}
-                )
+                add_jpeg_error(pos, f"Trailing bytes after JPEG EOI ({len(raw) - pos} bytes)")
             break
 
         if marker == 0xD8 or (0xD0 <= marker <= 0xD7) or marker == 0x01:
             continue
 
         if pos + 2 > len(raw):
-            container_errors.append({"byte_offset": seg_offset, "reason": "Truncated JPEG segment length"})
+            add_jpeg_error(seg_offset, "Truncated JPEG segment length")
             break
 
         seg_len = struct.unpack_from(">H", raw, pos)[0]
         if seg_len < 2 or pos + seg_len > len(raw):
-            container_errors.append(
-                {"byte_offset": seg_offset, "reason": f"Invalid or truncated JPEG segment length {seg_len}"}
-            )
+            add_jpeg_error(seg_offset, f"Invalid or truncated JPEG segment length {seg_len}")
             break
 
         seg_data = raw[pos + 2 : pos + seg_len]
-        segments.append({"marker": f"0xFF{marker:02X}", "byte_offset": seg_offset, "length": seg_len})
+        if first_seg_offset is None:
+            first_seg_offset = seg_offset
+        segments_count += 1
 
         if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
             saw_sof = True
         elif marker == 0xE2 and seg_data.startswith(b"ICC_PROFILE\x00"):
             if len(seg_data) < 14:
-                container_errors.append({"byte_offset": seg_offset, "reason": "Truncated APP2 ICC_PROFILE header"})
+                add_jpeg_error(seg_offset, "Truncated APP2 ICC_PROFILE header")
             else:
                 seq_no = seg_data[12]
                 tot_no = seg_data[13]
                 if seq_no < 1 or tot_no < 1 or seq_no > tot_no:
-                    container_errors.append(
-                        {"byte_offset": seg_offset, "reason": f"Invalid APP2 ICC chunk numbering {seq_no}/{tot_no}"}
-                    )
+                    add_jpeg_error(seg_offset, f"Invalid APP2 ICC chunk numbering {seq_no}/{tot_no}")
                 elif seq_no in icc_chunks:
-                    container_errors.append(
-                        {"byte_offset": seg_offset, "reason": f"Duplicate APP2 ICC chunk sequence {seq_no}"}
-                    )
+                    add_jpeg_error(seg_offset, f"Duplicate APP2 ICC chunk sequence {seq_no}")
                 else:
                     if icc_declared_total is None:
                         icc_declared_total = tot_no
                     elif icc_declared_total != tot_no:
-                        container_errors.append(
-                            {"byte_offset": seg_offset, "reason": "Inconsistent APP2 ICC total_chunks count"}
-                        )
+                        add_jpeg_error(seg_offset, "Inconsistent APP2 ICC total_chunks count")
                     icc_chunks[seq_no] = (seg_offset, tot_no, seg_data[14:])
-        elif marker == 0xED and b"Photoshop 3.0\x00" in seg_data and b"8BIM" in seg_data:
+        elif (
+            marker == 0xED
+            and len(photoshop_8bim_offsets) < MAX_IMAGE_ERRORS
+            and b"Photoshop 3.0\x00" in seg_data
+            and b"8BIM" in seg_data
+        ):
             photoshop_8bim_offsets.append(seg_offset)
 
         pos += seg_len
@@ -499,9 +522,7 @@ def _inspect_jpeg(raw: bytes, label: str) -> Dict[str, Any]:
             saw_sos = True
             next_marker_offset, next_marker = _scan_jpeg_entropy_until_marker(raw, pos)
             if next_marker is None:
-                container_errors.append(
-                    {"byte_offset": seg_offset, "reason": "Truncated JPEG entropy scan: missing EOI (0xFFD9)"}
-                )
+                add_jpeg_error(seg_offset, "Truncated JPEG entropy scan: missing EOI (0xFFD9)")
                 pos = len(raw)
                 break
             pos = next_marker_offset
@@ -509,11 +530,9 @@ def _inspect_jpeg(raw: bytes, label: str) -> Dict[str, Any]:
     if icc_declared_total is not None:
         expected_keys = list(range(1, icc_declared_total + 1))
         if sorted(icc_chunks.keys()) != expected_keys:
-            container_errors.append(
-                {
-                    "byte_offset": segments[0]["byte_offset"] if segments else 2,
-                    "reason": f"Incomplete multi-segment APP2 ICC profile (got {sorted(icc_chunks.keys())} of 1..{icc_declared_total})",
-                }
+            add_jpeg_error(
+                first_seg_offset if first_seg_offset is not None else 2,
+                f"Incomplete multi-segment APP2 ICC profile (got {sorted(icc_chunks.keys())} of 1..{icc_declared_total})",
             )
         else:
             first_offset = icc_chunks[1][0]
@@ -523,19 +542,21 @@ def _inspect_jpeg(raw: bytes, label: str) -> Dict[str, Any]:
             icc_profiles.append(parsed_icc)
 
     if not saw_sof:
-        container_errors.append({"byte_offset": pos, "reason": "Missing JPEG Start-of-Frame (SOFn) segment"})
+        add_jpeg_error(pos, "Missing JPEG Start-of-Frame (SOFn) segment")
     if not saw_sos:
-        container_errors.append({"byte_offset": pos, "reason": "Missing JPEG Start-of-Scan (SOS) segment"})
+        add_jpeg_error(pos, "Missing JPEG Start-of-Scan (SOS) segment")
     if not saw_eoi:
-        container_errors.append({"byte_offset": pos, "reason": "Missing JPEG End-of-Image (EOI 0xFFD9) marker"})
+        add_jpeg_error(pos, "Missing JPEG End-of-Image (EOI 0xFFD9) marker")
 
-    valid_container = saw_sof and saw_sos and saw_eoi and not container_errors
+    valid_container = saw_sof and saw_sos and saw_eoi and container_errors_total == 0
     return {
         "artifact": label,
         "container_format": "JPEG",
         "valid_container": valid_container,
         "epistemic_tier": "DERIVED",
-        "segments_parsed": len(segments),
+        "segments_parsed": segments_count,
+        "container_errors_count": container_errors_total,
+        "container_errors_truncated": container_errors_total > MAX_IMAGE_ERRORS,
         "container_errors": container_errors,
         "icc_profiles": icc_profiles,
         "photoshop_app13_8bim_offsets": photoshop_8bim_offsets,

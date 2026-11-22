@@ -72,8 +72,14 @@ _ESC_MAP = {
 }
 
 _PDF_HEADER_RE = re.compile(rb"%PDF-(\d+\.\d+)")
-_XREF_STREAM_RE = re.compile(rb"/Type[\x00\t\n\x0c\r ]*/XRef\b")
-_STRUCT_EOF_TOKEN_RE = re.compile(rb"\\.|<<|>>|[()%<>]", re.DOTALL)
+_XREF_STREAM_RE = re.compile(
+    rb"/(?:T|#54)(?:y|#79)(?:p|#70)(?:e|#65)"
+    rb"[\x00\t\n\x0c\r ]*"
+    rb"/(?:X|#58)(?:R|#52)(?:e|#65)(?:f|#66)"
+    rb"(?=[\x00\t\n\x0c\r ()<>\[\]{}/%]|$)"
+)
+_TOP_PDF_LEX_RE = re.compile(rb"<<|>>|[()%<>]")
+_STR_PDF_LEX_RE = re.compile(rb"(?:\\.)+|[()]", re.DOTALL)
 
 # C-compiled linear scanners eliminating unbounded dual find(b"\n")+find(b"\r") scans and slice copies
 _EOL_RE = re.compile(rb"[\r\n]")
@@ -1450,45 +1456,63 @@ def _scan_structural_eof_offsets(
     raw_stream_spans: List[tuple[int, int]],
     note_marker_cap: Callable[[int], None] | None = None,
     add_error: Callable[[int | None, str], None] | None = None,
-) -> tuple[List[int], int, int]:
+    *,
+    header_offset: int = -1,
+    header_end: int = -1,
+) -> tuple[List[int], int, int, List[tuple[int, int]]]:
     """
-    Single-pass O(N) lexical scanner for structural PDF trailer `%%EOF` markers.
+    Unified single-pass O(N) lexical scanner for structural PDF trailer `%%EOF` markers and
+    plain top-level PDF code windows (excluding streams, `(...)` strings, `<...>` hex strings,
+    and `%...EOL` comments).
 
-    Skips all `raw_stream_spans`, balanced literal strings `(...)` (honoring `\\` escapes),
-    hexadecimal strings `<...>` (distinguished from `<<` / `>>` dictionary delimiters), and
-    mid-line `%` comments so embedded stream data or string literals never inflate
-    `incremental_revision_count`.
+    Shared across `eof_offsets`, `startxref_offsets`, `xref_offsets`, and `xref_stream_offsets`
+    so neither embedded stream payloads, string/hex literals (valid or malformed), nor header/body
+    `%` comments can spoof or mismatch trailer markers.
     """
     eof_offsets: List[int] = []
+    code_windows: List[tuple[int, int]] = []
     total_eof_count = 0
     last_eof_offset = -1
     n = len(raw)
+    scan_start = header_offset if header_offset > 0 else 0
 
     for win_lo, win_hi in _build_non_stream_windows(n, raw_stream_spans):
+        if win_hi <= scan_start:
+            continue
+        if win_lo < scan_start:
+            win_lo = scan_start
         pos = win_lo
+        code_start = win_lo
         paren_depth = 0
         open_paren_offset = win_lo
         while pos < win_hi:
-            m = _STRUCT_EOF_TOKEN_RE.search(raw, pos, win_hi)
-            if m is None:
-                break
-            idx = m.start()
-            tok = m.group(0)
-
             if paren_depth > 0:
-                if tok.startswith(b"\\"):
-                    pos = m.end()
-                elif tok == b"(":
+                m = _STR_PDF_LEX_RE.search(raw, pos, win_hi)
+                if m is None:
+                    break
+                idx = m.start()
+                tok = m.group(0)
+                if tok == b"(":
                     paren_depth += 1
                     pos = idx + 1
                 elif tok == b")":
                     paren_depth -= 1
                     pos = idx + 1
+                    if paren_depth == 0:
+                        code_start = pos
                 else:
                     pos = m.end()
                 continue
 
+            m = _TOP_PDF_LEX_RE.search(raw, pos, win_hi)
+            if m is None:
+                break
+            idx = m.start()
+            tok = m.group(0)
+
             if tok == b"(":
+                if code_start < idx:
+                    code_windows.append((code_start, idx))
                 paren_depth = 1
                 open_paren_offset = idx
                 pos = idx + 1
@@ -1497,27 +1521,34 @@ def _scan_structural_eof_offsets(
                 pos = idx + 2
                 continue
             if tok == b"<":
-                if idx + 1 < win_hi and raw[idx + 1] in _HEX_OR_WS_BYTES:
-                    nm = _NON_HEX_WS_RE.search(raw, idx + 1, win_hi)
-                    if nm is None:
-                        pos = win_hi
-                    elif raw[nm.start()] == 0x3E:
-                        pos = nm.start() + 1
-                    else:
-                        pos = nm.start()
-                elif idx + 1 < win_hi and raw[idx + 1] == 0x3E:
-                    pos = idx + 2
+                if code_start < idx:
+                    code_windows.append((code_start, idx))
+                close_gt = raw.find(b">", idx + 1, win_hi)
+                if close_gt == -1:
+                    if add_error is not None:
+                        add_error(
+                            idx,
+                            "Unterminated PDF hexadecimal string '<' encountered during structural trailer scan",
+                        )
+                    pos = win_hi
+                    code_start = win_hi
                 else:
-                    pos = idx + 1
+                    if _NON_HEX_WS_RE.search(raw, idx + 1, close_gt) is not None and add_error is not None:
+                        add_error(
+                            idx,
+                            "Malformed non-hexadecimal character inside PDF '<...>' string",
+                        )
+                    pos = close_gt + 1
+                    code_start = pos
                 continue
-            if tok in (b")", b">") or tok.startswith(b"\\"):
+            if tok in (b")", b">"):
                 pos = m.end()
                 continue
 
-            # tok == b"%": distinguish `%PDF-x.y`, structural trailer `%%EOF`, and ordinary `%` comments
-            if raw[idx : idx + 5] == b"%PDF-":
-                pos = min(win_hi, idx + 8)
-                continue
+            # tok == b"%": flush preceding plain code, then distinguish structural `%%EOF` vs `%...EOL` comment
+            if code_start < idx:
+                code_windows.append((code_start, idx))
+
             if (
                 raw[idx : idx + 5] == b"%%EOF"
                 and (idx == 0 or raw[idx - 1] in _PDF_WS_BYTES or raw[idx - 1] in b")>]}")
@@ -1530,18 +1561,27 @@ def _scan_structural_eof_offsets(
                 elif note_marker_cap is not None:
                     note_marker_cap(idx)
                 pos = min(win_hi, idx + 5)
+                code_start = pos
                 continue
 
             eol_m = _EOL_RE.search(raw, idx + 1, win_hi)
-            pos = eol_m.end() if eol_m is not None else win_hi
+            if eol_m is not None:
+                pos = eol_m.end()
+            elif idx == header_offset and header_end > idx:
+                pos = min(win_hi, header_end)
+            else:
+                pos = win_hi
+            code_start = pos
 
-        if paren_depth > 0 and add_error is not None:
+        if paren_depth == 0 and code_start < win_hi:
+            code_windows.append((code_start, win_hi))
+        elif paren_depth > 0 and add_error is not None:
             add_error(
                 open_paren_offset,
                 "Unterminated PDF literal string '(' encountered during structural trailer scan",
             )
 
-    return eof_offsets, total_eof_count, last_eof_offset
+    return eof_offsets, total_eof_count, last_eof_offset, code_windows
 
 
 def _scan_startxref_offsets(
@@ -1549,35 +1589,47 @@ def _scan_startxref_offsets(
     add_error: Callable[[int | None, str], None],
     note_marker_cap: Callable[[int], None],
     skip_spans: List[tuple[int, int]] | None = None,
+    *,
+    windows: List[tuple[int, int]] | None = None,
 ) -> List[Dict[str, Any]]:
     """
-    Linear O(N) scanner for `startxref` pointers outside `skip_spans` with <=18-digit integer bounds.
+    Linear O(N) scanner for `startxref` pointers across structural code windows with <=18-digit bounds.
 
     Never invokes unbounded `int()` on >4300-digit inputs (`sys.get_int_max_str_digits()`).
     """
     out: List[Dict[str, Any]] = []
     n = len(raw)
+    scan_windows = windows if windows is not None else _build_non_stream_windows(n, skip_spans)
+    min_next_pos = 0
 
-    for win_lo, win_hi in _build_non_stream_windows(n, skip_spans):
-        cursor = win_lo
+    for win_lo, win_hi in scan_windows:
+        cursor = max(win_lo, min_next_pos)
         while cursor < win_hi:
             pos = raw.find(b"startxref", cursor, win_hi)
             if pos == -1:
                 break
             after = pos + 9
-            if pos > 0 and raw[pos - 1] in _ASCII_WORD_BYTES:
+            if pos > 0 and raw[pos - 1] not in _PDF_WS_BYTES and raw[pos - 1] not in b")>]}":
                 cursor = after
                 continue
 
-            ws_end = after
-            ws_cap = min(win_hi, after + 64)
-            while ws_end < ws_cap and raw[ws_end] in _PDF_WS_BYTES:
-                ws_end += 1
-            if ws_end == after or ws_end >= win_hi:
-                cursor = after
+            p = after
+            ws_cap = min(n, after + 4096)
+            while p < ws_cap:
+                if raw[p] in _PDF_WS_BYTES:
+                    p += 1
+                elif raw[p] == 0x25 and raw[p : p + 5] != b"%%EOF":
+                    eol_m = _EOL_RE.search(raw, p + 1, ws_cap)
+                    if eol_m is None:
+                        p = ws_cap
+                        break
+                    p = eol_m.end()
+                else:
+                    break
+            if p == after or p >= n:
+                cursor = min(win_hi, after)
                 continue
 
-            p = ws_end
             sign = 1
             if raw[p] in (0x2B, 0x2D):
                 if raw[p] == 0x2D:
@@ -1585,13 +1637,14 @@ def _scan_startxref_offsets(
                 p += 1
 
             d_start = p
-            while p < win_hi and 0x30 <= raw[p] <= 0x39:
+            while p < n and 0x30 <= raw[p] <= 0x39:
                 p += 1
             if p == d_start:
-                cursor = ws_end
+                cursor = min(win_hi, max(after, p))
                 continue
 
-            cursor = p
+            min_next_pos = p
+            cursor = min(win_hi, p)
             sig_digits = raw[d_start:p].lstrip(b"0")
 
             if len(sig_digits) > MAX_STARTXREF_DIGITS:
@@ -2048,12 +2101,14 @@ def inspect_pdf_container(
         if b"/" in dec_bytes or (not xmp_capped and b"<?xpacket" in dec_bytes):
             inspect_decoded_stream_payload(dec_bytes, pos, from_compressed=True)
 
-    # Stage 2: Structural trailer/xref marker scan (skipping raw_stream_spans & strings) + lexical scan
-    eof_offsets, total_eof_count, last_eof_offset = _scan_structural_eof_offsets(
+    # Stage 2: Unified structural trailer/xref marker scan (skipping streams, strings, hex & comments)
+    eof_offsets, total_eof_count, last_eof_offset, structural_code_windows = _scan_structural_eof_offsets(
         raw,
         raw_stream_spans,
         note_marker_cap=note_marker_cap,
         add_error=add_error,
+        header_offset=header_offset,
+        header_end=hdr_match.end(),
     )
     if total_eof_count == 0:
         add_error(n, "Missing terminal %%EOF marker")
@@ -2062,7 +2117,7 @@ def inspect_pdf_container(
         raw,
         add_error,
         note_marker_cap,
-        skip_spans=raw_stream_spans,
+        windows=structural_code_windows,
     )
     if len(startxref_offsets) > total_eof_count and not markers_capped:
         add_error(
@@ -2072,13 +2127,13 @@ def inspect_pdf_container(
 
     xref_offsets: List[int] = []
     xref_cap_hit = False
-    for win_lo, win_hi in _build_non_stream_windows(n, raw_stream_spans):
+    for win_lo, win_hi in structural_code_windows:
         xref_cur = win_lo
         while xref_cur < win_hi:
             xpos = raw.find(b"xref", xref_cur, win_hi)
             if xpos == -1:
                 break
-            if (xpos == 0 or raw[xpos - 1] in (0x0A, 0x0D)) and (
+            if (xpos == 0 or raw[xpos - 1] in _PDF_WS_BYTES or raw[xpos - 1] in b")>]}") and (
                 xpos + 4 < n and raw[xpos + 4] in _PDF_WS_BYTES
             ):
                 if len(xref_offsets) < MAX_CONTAINER_MARKERS:
@@ -2093,7 +2148,7 @@ def inspect_pdf_container(
 
     xref_stream_offsets: List[int] = []
     xref_stm_cap_hit = False
-    for win_lo, win_hi in _build_non_stream_windows(n, raw_stream_spans):
+    for win_lo, win_hi in structural_code_windows:
         for m in _XREF_STREAM_RE.finditer(raw, win_lo, win_hi):
             if len(xref_stream_offsets) < MAX_CONTAINER_MARKERS:
                 xref_stream_offsets.append(m.start())

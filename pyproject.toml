@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "starshield-forensics"
-version = "0.3.10"
+version = "0.3.11"
 description = "Deterministic, offline Chromium & Electron LevelDB (.log) carver, PNG/JPEG/PDF structural container inspector, identifier check-digit verifier, and read-only MCP server."
 readme = "README.md"
 license = "MIT"

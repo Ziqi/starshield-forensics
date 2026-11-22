@@ -1,6 +1,6 @@
 # Security Assurance Case, Architecture & Scope Boundaries
 
-> **Structured Software Assurance Case (structured per NIST IR 7608)** for `starshield-forensics` (`v0.3.10`).
+> **Structured Software Assurance Case (structured per NIST IR 7608)** for `starshield-forensics` (`v0.3.11`).
 
 ---
 
@@ -97,7 +97,7 @@ Forensic inputs (Chromium caches, screenshots, exported chat JSONs) originate fr
 
 ## 6. Verification Evidence Summary
 
-1. **Automated Test Suite & Coverage (`>= 80%` Gate):** `tests/test_adversarial.py` + `benchmark/benchmark_suite.py` achieve **> 85% statement coverage** across `starshield/`, enforced on Python 3.10–3.13 in `.github/workflows/ci.yml`.
+1. **Automated Test Suite & Coverage (`>= 80%` Gate):** `tests/test_adversarial.py` + `benchmark/benchmark_suite.py` enforce **>= 80% statement coverage** across `starshield/` on Python 3.10–3.13 in `.github/workflows/ci.yml`.
 2. **Static Security & Style Analysis:** `GitHub CodeQL`, `PyCQA Bandit`, and `Astral Ruff` execute automatically on every push/PR in CI with zero findings permitted.
 3. **Bit-for-Bit Reproducible Builds:** `scripts/build_reproducible.py --verify` builds `starshield.pyz` twice from source and asserts identical `SHA-256` digests in CI, paired with `scripts/generate_spdx_sbom.py --verify` for ISO/IEC 5962:2021 SPDX 2.3 SBOM verification.
 4. **Continuous Coverage-Guided & Mutation Fuzzing (`Fuzzing: 10/10`):** `tests/fuzz_parsers.py` + `.clusterfuzzlite/` (`google/clusterfuzzlite` + `Atheris` libFuzzer in `.github/workflows/cflite.yml`) continuously fuzz LevelDB 32 KiB WAL block reassembly, PNG `iCCP` zlib streams, multi-segment JPEG `APP2`/`8BIM` containers, and ISO-7812/13616/9362 checksum validators, achieving `10/10` on the OpenSSF Scorecard `Fuzzing` check (`8.0/10` overall).
@@ -107,7 +107,7 @@ Forensic inputs (Chromium caches, screenshots, exported chat JSONs) originate fr
 
 ## 7. Architectural Format Boundaries & Explicit Non-Goals (`documentation_roadmap`)
 
-### Current Format & Evidentiary Boundaries (`v0.3.10`)
+### Current Format & Evidentiary Boundaries (`v0.3.11`)
 - **Uncompacted LevelDB `.log` Scope:** Parses 32 KiB physical blocks and `WriteBatch` frames in uncompacted `.log` write-ahead logs; does **not** decompress Snappy-compressed `.ldb` SSTables, follow external `.blob` directories, decode non-JSON binary Blink V8 `StructuredClone` payloads, or inspect SQLite B-Tree / `-wal` stores (such as newly created Chrome 156+ IndexedDB stores).
 - **Container Structure Observation Only:** PNG, JPEG, and PDF container inspectors report deterministic structural markers (`CRC32`, `ICC_PROFILE`, structural trailer `%%EOF`, `/Info`, XMP) alongside benign explanations; they never claim pixel forgery or tamper authentication.
 
