@@ -1,7 +1,7 @@
 header:
   schema-version: '2.0.0'
-  last-updated: '2026-11-14'
-  last-reviewed: '2026-11-14'
+  last-updated: '2026-11-22'
+  last-reviewed: '2026-11-22'
   url: https://github.com/Ziqi/starshield-forensics/blob/main/SECURITY-INSIGHTS.yml
   comment: >
     Machine-readable OpenSSF Security Insights (v2.0.0) and OSPS baseline
@@ -51,11 +51,11 @@ project:
       Reporting (https://github.com/Ziqi/starshield-forensics/security/advisories/new)
       with a 48-hour acknowledgment SLA.
   documentation:
-    quickstart-guide: https://github.com/Ziqi/starshield-forensics#10-second-zero-install-tryout-uvx--installation-pip-pep-740--pyz
+    quickstart-guide: https://github.com/Ziqi/starshield-forensics#quick-tryout-uvx--installation-pip-pep-740--pyz
     detailed-guide: https://ziqi.github.io/starshield/
     code-of-conduct: https://github.com/Ziqi/starshield-forensics/blob/main/CODE_OF_CONDUCT.md
     release-process: https://github.com/Ziqi/starshield-forensics/blob/main/SECURITY_ASSURANCE_CASE.md
-    signature-verification: https://github.com/Ziqi/starshield-forensics#cryptographic-release-verification--bit-for-bit-reproducibility-v037
+    signature-verification: https://github.com/Ziqi/starshield-forensics#cryptographic-release-verification--bit-for-bit-reproducibility-v039
 
 repository:
   url: https://github.com/Ziqi/starshield-forensics
@@ -86,12 +86,12 @@ repository:
       url: https://github.com/Ziqi/starshield-forensics/blob/main/LICENSE
       expression: MIT
     distribution-points:
-      - uri: https://github.com/Ziqi/starshield-forensics/releases/tag/v0.3.8
-        comment: Official GitHub Release v0.3.8 with signed zipapp, wheel, sdist, SPDX 2.3 SBOM, and SLSA L3 provenance.
-      - uri: pkg:pypi/starshield-forensics@0.3.8
+      - uri: https://github.com/Ziqi/starshield-forensics/releases/tag/v0.3.9
+        comment: Official GitHub Release v0.3.9 with signed zipapp, wheel, sdist, SPDX 2.3 SBOM, and SLSA L3 provenance.
+      - uri: pkg:pypi/starshield-forensics@0.3.9
         comment: Python package identifier (stdlib-only runtime).
       - uri: https://doi.org/10.5281/zenodo.24145804
-        comment: "Permanent CERN Zenodo Concept DOI auto-resolving to the latest signed release (v0.3.7 DOI 10.5281/zenodo.24156262)."
+        comment: "Permanent CERN Zenodo Concept DOI auto-resolving to the latest signed release (historical v0.3.7 record DOI 10.5281/zenodo.24156262)."
     attestations:
       - name: GitHub OIDC Sigstore Build Provenance & SBOM Attestations
         predicate-uri: https://slsa.dev/provenance/v1
@@ -99,11 +99,11 @@ repository:
         comment: Sigstore Fulcio X.509 and Rekor transparency log attestations verifiable via gh attestation verify.
       - name: SLSA Build Level 3 Isolated Provenance
         predicate-uri: https://slsa.dev/provenance/v0.2
-        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.3.8/multiple.intoto.jsonl
+        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.3.9/multiple.intoto.jsonl
         comment: Non-forgeable SLSA v1.0 Level 3 provenance generated via slsa-framework/slsa-github-generator.
       - name: Release SPDX 2.3 SBOM
         predicate-uri: https://spdx.dev/Document/v2.3
-        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.3.8/starshield-forensics-0.3.8.spdx.json
+        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.3.9/starshield-forensics-0.3.9.spdx.json
         comment: Deterministic ISO/IEC 5962:2021 SPDX 2.3 JSON Software Bill of Materials.
   security:
     assessments:

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# SPDX-FileCopyrightText: 2026 Ziqi Xiao
+# SPDX-License-Identifier: MIT
 """
 Structural PNG (RFC 2083) & JPEG (ISO/IEC 10918-1) Metadata & ICC Profile Inspector.
 

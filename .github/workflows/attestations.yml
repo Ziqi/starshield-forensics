@@ -6,7 +6,7 @@ on:
       release_tag:
         description: "Release tag to attest and attach SLSA L3 provenance to"
         required: false
-        default: "v0.3.8"
+        default: "v0.3.9"
         type: string
   release:
     types: [published]
@@ -33,69 +33,86 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build reproducible zipapp, verify pinned release digests & generate SPDX 2.3 SBOM
+      - name: Build reproducible zipapp, verify signed release digests & generate SPDX 2.3 SBOM
         id: subjects
         env:
           INPUT_TAG: ${{ inputs.release_tag }}
           EVENT_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          TAG="${EVENT_TAG:-${INPUT_TAG:-v0.3.8}}"
+          TAG="${EVENT_TAG:-${INPUT_TAG:-v0.3.9}}"
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Invalid release tag format: $TAG" >&2
             exit 1
           fi
+          VER="${TAG#v}"
+          BASE_URL="https://github.com/Ziqi/starshield-forensics/releases/download/${TAG}"
+          WHL_NAME="starshield_forensics-${VER}-py3-none-any.whl"
+          SDIST_NAME="starshield_forensics-${VER}.tar.gz"
+          SBOM_NAME="starshield-forensics-${VER}.spdx.json"
 
-          mkdir -p dist
+          mkdir -p dist /tmp/release-sig
           python scripts/build_reproducible.py --verify --output dist/starshield.pyz
-          echo "394f8e0208aae3e87751c8dd8e6c820ea13c5d896b62e39315c24018ad573c99  dist/starshield.pyz" | sha256sum -c -
+          if [[ "$TAG" == "v0.3.9" ]]; then
+            echo "fd739ec2ec9f9dcc908cf0bed72797393e7389372267f25b75f2461d75893200  dist/starshield.pyz" | sha256sum -c -
+          fi
 
-          curl -fsSL -o dist/starshield_forensics-0.3.8-py3-none-any.whl \
-            "https://github.com/Ziqi/starshield-forensics/releases/download/${TAG}/starshield_forensics-0.3.8-py3-none-any.whl"
-          curl -fsSL -o dist/starshield_forensics-0.3.8.tar.gz \
-            "https://github.com/Ziqi/starshield-forensics/releases/download/${TAG}/starshield_forensics-0.3.8.tar.gz"
+          curl -fsSL -o /tmp/release-sig/SHA256SUMS "${BASE_URL}/SHA256SUMS"
+          curl -fsSL -o /tmp/release-sig/SHA256SUMS.sig "${BASE_URL}/SHA256SUMS.sig"
+          curl -fsSL -o "dist/${WHL_NAME}" "${BASE_URL}/${WHL_NAME}"
+          curl -fsSL -o "dist/${SDIST_NAME}" "${BASE_URL}/${SDIST_NAME}"
 
-          cat <<'EOF' | sha256sum -c -
-          6f1e045be023b7acd4b3e6f4bf4e4cfce392639bb8b88f1e351369daf13ed817  dist/starshield_forensics-0.3.8-py3-none-any.whl
-          87afc0617eedd5a760a5ddfb7ab5ba002dc930ff25db7ad7cd2d8bd115e19325  dist/starshield_forensics-0.3.8.tar.gz
-          EOF
+          ssh-keygen -Y verify \
+            -f KEYS.pub \
+            -I "2196305+Ziqi@users.noreply.github.com" \
+            -n file \
+            -s /tmp/release-sig/SHA256SUMS.sig < /tmp/release-sig/SHA256SUMS
+
+          (
+            cd dist
+            grep -E "  (starshield\.pyz|${WHL_NAME}|${SDIST_NAME})$" /tmp/release-sig/SHA256SUMS | sha256sum -c -
+          )
 
           python scripts/generate_spdx_sbom.py \
             --verify \
             --verify-pyz dist/starshield.pyz \
-            --output dist/starshield-forensics-0.3.8.spdx.json
+            --wheel "dist/${WHL_NAME}" \
+            --sdist "dist/${SDIST_NAME}" \
+            --require-dists \
+            --output "dist/${SBOM_NAME}"
 
           B64="$(cd dist && sha256sum \
             starshield.pyz \
-            starshield_forensics-0.3.8-py3-none-any.whl \
-            starshield_forensics-0.3.8.tar.gz \
-            starshield-forensics-0.3.8.spdx.json | base64 -w0)"
+            "${WHL_NAME}" \
+            "${SDIST_NAME}" \
+            "${SBOM_NAME}" | base64 -w0)"
           echo "subjects_b64=${B64}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
 
       - name: Attest artifact build provenance (Sigstore Fulcio + Rekor)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/starshield.pyz
-            dist/starshield_forensics-0.3.8-py3-none-any.whl
-            dist/starshield_forensics-0.3.8.tar.gz
-            dist/starshield-forensics-0.3.8.spdx.json
+            dist/starshield_forensics-${{ steps.subjects.outputs.ver }}-py3-none-any.whl
+            dist/starshield_forensics-${{ steps.subjects.outputs.ver }}.tar.gz
+            dist/starshield-forensics-${{ steps.subjects.outputs.ver }}.spdx.json
 
       - name: Attest SPDX 2.3 SBOM (Sigstore Fulcio + Rekor)
         uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: |
             dist/starshield.pyz
-            dist/starshield_forensics-0.3.8-py3-none-any.whl
-            dist/starshield_forensics-0.3.8.tar.gz
-          sbom-path: dist/starshield-forensics-0.3.8.spdx.json
+            dist/starshield_forensics-${{ steps.subjects.outputs.ver }}-py3-none-any.whl
+            dist/starshield_forensics-${{ steps.subjects.outputs.ver }}.tar.gz
+          sbom-path: dist/starshield-forensics-${{ steps.subjects.outputs.ver }}.spdx.json
 
       - name: Upload deterministic SPDX 2.3 SBOM workflow artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: starshield-spdx-sbom
-          path: dist/starshield-forensics-0.3.8.spdx.json
+          path: dist/starshield-forensics-${{ steps.subjects.outputs.ver }}.spdx.json
           if-no-files-found: error
           retention-days: 30
 

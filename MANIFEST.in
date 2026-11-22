@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Ziqi Xiao
+# SPDX-License-Identifier: MIT
+include LICENSE
+include REUSE.toml
+include README.md
+include README.zh-CN.md
+include SECURITY.md
+include SECURITY_ASSURANCE_CASE.md
+include SECURITY-INSIGHTS.yml
+include GOVERNANCE.md
+include CONTRIBUTING.md
+include CODE_OF_CONDUCT.md
+include CITATION.cff
+include KEYS.pub
+include funding.json
+recursive-include LICENSES *.txt
+recursive-include samples *.json
+recursive-include tests *.py
+recursive-include scripts *.py
+recursive-include benchmark *.py *.md

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# SPDX-FileCopyrightText: 2026 Ziqi Xiao
+# SPDX-License-Identifier: MIT
 """
 Google LevelDB Write-Ahead Log (`.log`) Binary Frame, Multi-Schema JSON Carver
 & Local Storage Precheck Gate for Chromium IndexedDB / Web Application Caches.
@@ -21,8 +23,8 @@ Implements the official LevelDB log format specification:
 Scope & Honest Limitations:
 - Targets uncompressed LevelDB `.log` write-ahead logs and embedded UTF-8/UTF-16LE JSON
   slices inside Chromium IndexedDB / Local Storage WriteBatch values.
-- Does NOT decompress Snappy-compressed `.ldb` SSTable data blocks or decode binary-only
-  Blink V8 StructuredClone primitives (scheduled for v0.4).
+- Does NOT decompress Snappy-compressed `.ldb` SSTable data blocks, follow external `.blob`
+  files, or decode binary-only Blink V8 StructuredClone primitives.
 """
 
 from __future__ import annotations
@@ -32,6 +34,8 @@ import json
 import struct
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+
+from starshield import __version__
 
 BLOCK_SIZE = 32768
 HEADER_SIZE = 7
@@ -566,7 +570,7 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
 
     chatsvc_count = sum(1 for r in recovered_entries if r.get("schema_detected") == "chatsvc")
     return {
-        "parser": "leveldb_wal_32k_crc32c_v0.3.6",
+        "parser": f"leveldb_wal_32k_crc32c_v{__version__}",
         "schema_mode": schema_mode,
         "file_size_bytes": total_len,
         "valid_physical_frames": physical_records_ok,
@@ -690,17 +694,14 @@ def inspect_chromium_storage_path(
 ) -> Dict[str, Any]:
     """
     Zero-PII local precheck gate (`GO` / `PARTIAL` / `NO_GO_COMPACTED_OR_UNSUPPORTED`)
-    for law-firm IT or forensic intake teams before instructing a paid triage pilot.
+    for offline endpoint or forensic intake pre-screening.
     Never emits plaintext message content, filenames, or raw hashes in default masked mode.
     """
     if max_mb < 1:
         raise ValueError("--max-mb safety limit must be >= 1 MiB")
     if not target.exists():
         if redact:
-            raise OSError(
-                "Unable to access target path (OS path suppressed in masked mode; "
-                "pass --unredacted in an offline lab for path diagnostics)"
-            )
+            raise OSError("Unable to access target path (OS path suppressed in masked mode)")
         raise FileNotFoundError(f"Target path does not exist: {target}")
 
     limit_bytes = max_mb * 1024 * 1024
@@ -759,25 +760,27 @@ def inspect_chromium_storage_path(
         verdict = "GO"
         guidance = (
             "Uncompacted LevelDB .log frames contain carvable JSON records. "
-            "Eligible for immediate byte-offset-cited extraction under v0.3.6."
+            f"Eligible for immediate byte-offset-cited extraction under v{__version__}."
         )
     elif carvable_records > 0:
         verdict = "PARTIAL"
         guidance = (
             "Carvable JSON records are recoverable from uncompacted .log frames, alongside compacted "
-            ".ldb SSTables, external .blob files, or binary-only Blink V8 values that fall outside v0.3.6 scope."
+            f".ldb SSTables, external .blob files, or binary-only Blink V8 values that fall outside v{__version__} scope."
         )
     else:
         verdict = "NO_GO_COMPACTED_OR_UNSUPPORTED"
         guidance = (
             "Zero carvable JSON records found in uncompacted .log files (storage may already be compacted "
-            "into Snappy .ldb SSTables, encoded solely in binary Blink V8 StructuredClone, or empty). "
-            "Under StarShield SOW terms, £0 pilot fee applies."
+            "into Snappy .ldb SSTables, encoded solely in binary Blink V8 StructuredClone, backed by newly "
+            "created Chrome 156+ SQLite IndexedDB while existing LevelDB stores remain in LevelDB, or empty). "
+            "For compacted .ldb SSTables or binary Blink IndexedDB stores, use full LevelDB/Blink parsers "
+            "such as dfindexeddb or ccl_chromium_reader; for SQLite-backed stores, inspect with sqlite3."
         )
 
     return {
         "epistemic_tier": "OBSERVED",
-        "tool_version": "starshield-forensics/0.3.6",
+        "tool_version": f"starshield-forensics/{__version__}",
         "target_label": "[REDACTED_TARGET_PATH]" if redact else str(target),
         "schema_mode": schema_mode,
         "feasibility_verdict": verdict,

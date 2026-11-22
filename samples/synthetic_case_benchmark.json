@@ -4,7 +4,7 @@
     "tlp": "TLP:CLEAR",
     "clean_room_provenance": "Independently authored specification test vectors using ISO-13616 official example IBANs (GB82WEST12345698765432, NO9386011117947), RFC/ISO Luhn check-digit test strings (6200000000000005), synthetic test sort code 00-00-00, and arbitrary 2025-03-18 timestamps (post-PSR SD20 effective date). Zero correspondence to any real person, organization, or incident."
   },
-  "subject_sender_id": "user:accounts_payable_02",
+  "subject_sender_id": "user:subject_01",
   "messages": [
     {
       "id": "spec_msg_2025_01",
@@ -17,13 +17,13 @@
     },
     {
       "id": "spec_msg_2025_02",
-      "from": "user:accounts_payable_02",
+      "from": "user:subject_01",
       "composetime": "2025-03-18T10:02:00Z",
       "content": "Received"
     },
     {
       "id": "spec_msg_2025_03",
-      "from": "user:accounts_payable_02",
+      "from": "user:subject_01",
       "composetime": "2025-03-18T10:05:00Z",
       "content": "Checking PDF"
     },
@@ -39,7 +39,7 @@
     },
     {
       "id": "spec_msg_2025_05",
-      "from": "user:accounts_payable_02",
+      "from": "user:subject_01",
       "composetime": "2025-03-18T11:32:00Z",
       "content": "Queued now"
     },

@@ -1,15 +1,15 @@
 cff-version: 1.2.0
-title: "StarShield Forensics & StarShield-Bench-24: Deterministic Chromium Cache Carving, Container Provenance, and Adversarial Financial-Transcript Evaluation Suite"
-message: "If you use StarShield Forensics or StarShield-Bench-24 in digital forensics research, payment-dispute triage workflows, or LLM indirect prompt-injection evaluations, please cite this software and benchmark."
+title: "StarShield Forensics & StarShield-Bench-24: Offline Chromium LevelDB .log Carving, Container Structure Inspection, and Synthetic Evaluation Suite"
+message: "If you use StarShield Forensics or StarShield-Bench-24 in offline digital forensics research or endpoint triage workflows, please cite this software and benchmark."
 type: software
 authors:
   - family-names: "Xiao"
     given-names: "Ziqi"
 repository-code: "https://github.com/Ziqi/starshield-forensics"
 url: "https://ziqi.github.io/starshield/"
-version: "0.3.8"
+version: "0.3.9"
 doi: "10.5281/zenodo.24145804"
-date-released: "2026-11-14"
+date-released: "2026-11-22"
 license: "MIT"
 keywords:
   - "digital-forensics"
@@ -18,5 +18,5 @@ keywords:
   - "indexeddb"
   - "png-iccp-provenance"
   - "iban-mod97"
-  - "indirect-prompt-injection"
+  - "container-structure"
   - "synthetic-benchmark"

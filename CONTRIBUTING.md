@@ -1,6 +1,6 @@
 # Contributing to `starshield-forensics`
 
-Thank you for contributing to `starshield-forensics`. Because this toolkit is used in pre-action payment-dispute triage and digital forensics validation, all contributions must preserve **stdlib-only portability, memory-bounded parsing, and evidentiary neutrality**.
+Thank you for contributing to `starshield-forensics`. Because this toolkit is used in offline endpoint and digital forensics pre-screening, all contributions must preserve **stdlib-only portability, memory-bounded parsing, and evidentiary neutrality**.
 
 ## 1. Quick Development Setup (< 30 Seconds)
 

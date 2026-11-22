@@ -5,20 +5,15 @@
 """
 Dual-Tool & Independent Reference Cross-Validation Harness (`verify_cross_tool_forensics.py`).
 
-Structured in alignment with:
-  - UK Forensic Science Regulator (FSR) Statutory Code of Practice (`FSA – DIG 100`, superseding `FSR-C-100` / `FSR-C-107`)
-  - ISO/IEC 17025:2017 Clause 7.2.2 (Validation of Methods)
-  - NIST SP 800-86 / SWGDE Digital Forensics Tool Testing Guidelines
-
-Executes three deterministic validation suites without modifying runtime dependencies:
+Executes three deterministic validation suites without adding runtime package dependencies:
   - Suite 1: Chromium LevelDB `.log` Write-Ahead Log (WAL) frame-by-frame and record-by-record
     cross-validation against Google's `dfindexeddb` (`dfindexeddb.leveldb.log.FileReader`, when
     installed in an isolated QA venv) plus an independent clean-room LevelDB log decoder.
   - Suite 2: PNG (RFC 2083) & JPEG (ISO/IEC 10918-1) container framing and ISO 15076-1 (`acsp`)
     ICC header cross-validation against `Pillow` (`PIL.Image`, when installed) plus independent
     structural chunk/marker verifiers.
-  - Suite 3: Financial indicator mathematical cross-validation across ISO/IEC 7812 Luhn cards,
-    all 89 ISO 13616 IBAN jurisdictions (Mod-97-10), and all 250 ISO 9362 SWIFT/BIC country codes.
+  - Suite 3: Identifier check-digit & registry mathematical verification across ISO/IEC 7812 Luhn
+    cards, all 89 ISO 13616 IBAN jurisdictions (Mod-97-10), and all 250 ISO 9362 SWIFT/BIC codes.
 """
 
 from __future__ import annotations
@@ -609,11 +604,12 @@ def run_suite_1_leveldb(has_dfindexeddb: bool) -> Dict[str, Any]:
 
     return {
         "suite": "Suite 1 - Chromium LevelDB .log WAL Carving & Fragmented WriteBatch Reassembly",
-        "external_comparator": "google/dfindexeddb" if has_dfindexeddb else "stdlib-reference-only",
+        "external_comparator": "google/dfindexeddb" if has_dfindexeddb else "not-installed (stdlib self-check only)",
         "vectors_tested": len(vectors),
         "valid_physical_frames_verified": valid_frames_compared,
         "valid_records_verified": valid_records_compared,
-        "concordance_rate_valid_streams": 1.0,
+        "concordance_measured": bool(has_dfindexeddb),
+        "concordance_rate_valid_streams": 1.0 if has_dfindexeddb else None,
         "vectors": vector_reports,
     }
 
@@ -743,9 +739,10 @@ def run_suite_2_containers(has_pillow: bool) -> Dict[str, Any]:
 
     return {
         "suite": "Suite 2 - Structural PNG (RFC 2083), JPEG (ISO 10918-1) & ICC (ISO 15076-1) Verification",
-        "external_comparator": "Pillow (PIL.Image)" if has_pillow else "stdlib-reference-only",
+        "external_comparator": "Pillow (PIL.Image)" if has_pillow else "not-installed (stdlib self-check only)",
         "vectors_tested": len(cases),
-        "concordance_rate": 1.0,
+        "concordance_measured": bool(has_pillow),
+        "concordance_rate": 1.0 if has_pillow else None,
         "vectors": cases,
     }
 
@@ -850,21 +847,21 @@ def run_suite_3_iocs() -> Dict[str, Any]:
     bic_checked += 2
 
     return {
-        "suite": "Suite 3 - Financial Indicator Check-Digit & Registry Validation (ISO 7812 / 13616 / 9362)",
-        "external_comparator": "Independent GF(10) Luhn + Horner Mod 97-10 + ISO Registry Matrix",
+        "suite": "Suite 3 - Identifier Check-Digit & Registry Math Verification (ISO 7812 / 13616 / 9362)",
+        "external_comparator": "Internal GF(10) Luhn + Horner Mod 97-10 + ISO Registry Matrix",
         "luhn_vectors_tested": len(luhn_vectors),
         "iban_jurisdictions_tested": len(IBAN_LENGTHS),
         "iban_vectors_tested": iban_checked,
         "swift_bic_iso3166_codes_tested": len(ISO_3166_ALPHA2),
         "swift_bic_vectors_tested": bic_checked,
         "total_vectors_tested": len(luhn_vectors) + iban_checked + bic_checked,
-        "concordance_rate": 1.0,
+        "specification_match_rate": 1.0,
     }
 
 
 def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run UK FSR / ISO 17025 dual-tool & specification cross-validation suites."
+        description="Run cross-tool (dfindexeddb / Pillow) and specification validation suites."
     )
     parser.add_argument(
         "--require-external",
@@ -896,19 +893,19 @@ def main(argv: List[str] | None = None) -> int:
     s2 = run_suite_2_containers(has_pillow=has_pillow)
     s3 = run_suite_3_iocs()
     elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    total_vecs = int(s1["vectors_tested"]) + int(s2["vectors_tested"]) + int(s3["total_vectors_tested"])
+    both_external = bool(has_dfindexeddb and has_pillow)
 
     summary: Dict[str, Any] = {
         "validation_schema": "starshield-cross-tool-validation/v1",
-        "alignment_frameworks": [
-            "UK Forensic Science Regulator Statutory Code of Practice (FSA – DIG 100, superseding FSR-C-100 / FSR-C-107)",
-            "ISO/IEC 17025:2017 Clause 7.2.2 (Validation of Methods)",
-            "SWGDE / NIST SP 800-86 Digital Forensics Tool Testing",
+        "reference_specifications": [
+            "LevelDB log format (32 KiB blocks, Castagnoli CRC32C polynomial 0x82F63B78 + mask delta 0xA282EAD8)",
+            "RFC 2083 (PNG), ISO/IEC 10918-1 (JPEG), ISO 15076-1 (ICC acsp)",
+            "ISO/IEC 7812 (Luhn), ISO 13616 (IBAN Mod 97-10), ISO 9362 (SWIFT/BIC)",
         ],
-        "accreditation_disclaimer": (
-            "Self-contained open-source tool validation summary structured in alignment with UK FSR Statutory "
-            "Code of Practice (FSA – DIG 100, superseding FSR-C-107) and ISO/IEC 17025 Clause 7.2.2 to assist "
-            "accredited forensic laboratories and instructing solicitors in their local validation workflows - "
-            "not a claim of laboratory accreditation."
+        "scope_disclaimer": (
+            "Open-source technical cross-validation against external reference libraries (when installed) "
+            "and published format specifications; not a claim of laboratory accreditation or regulatory certification."
         ),
         "subject_tool": {
             "name": "starshield-forensics",
@@ -922,6 +919,8 @@ def main(argv: List[str] | None = None) -> int:
             "dfindexeddb_version": df_ver,
             "pillow_available": has_pillow,
             "pillow_version": pil_ver,
+            "external_concordance_measured": both_external,
+            "total_vectors_tested": total_vecs,
             "elapsed_ms": elapsed_ms,
         },
         "suites": {
@@ -936,17 +935,26 @@ def main(argv: List[str] | None = None) -> int:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         args.json_out.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
-    mode_str = (
-        f"DUAL-TOOL EXTERNAL (dfindexeddb={df_ver}, Pillow={pil_ver})"
-        if (has_dfindexeddb and has_pillow)
-        else "STANDALONE STDLIB REFERENCE"
-    )
-    print(
-        f"[PASS] starshield-forensics v{__version__} cross-validation ({mode_str}) completed in {elapsed_ms} ms | "
-        f"S1={s1['vectors_tested']} WAL vectors ({s1['valid_records_verified']} valid records, 100% concordance) | "
-        f"S2={s2['vectors_tested']} PNG/JPEG vectors (100% concordance) | "
-        f"S3={s3['total_vectors_tested']} ISO-7812/13616/9362 vectors (100% concordance)"
-    )
+    if both_external:
+        print(
+            f"[PASS] starshield-forensics v{__version__} cross-validation "
+            f"(DUAL-TOOL EXTERNAL: dfindexeddb={df_ver}, Pillow={pil_ver}; total_vectors={total_vecs}) "
+            f"completed in {elapsed_ms} ms | "
+            f"S1={s1['vectors_tested']} WAL vectors ({s1['valid_records_verified']} valid records, "
+            f"100% concordance vs dfindexeddb {df_ver}) | "
+            f"S2={s2['vectors_tested']} PNG/JPEG vectors (100% concordance vs Pillow {pil_ver}) | "
+            f"S3={s3['total_vectors_tested']} ISO-7812/13616/9362 specification vectors"
+        )
+    else:
+        print(
+            f"[PASS] starshield-forensics v{__version__} self-check "
+            f"(STANDALONE SELF-CHECK ONLY: dfindexeddb={df_ver or 'not-installed'}, "
+            f"Pillow={pil_ver or 'not-installed'}; external cross-tool concordance NOT measured; "
+            f"total_vectors={total_vecs}) completed in {elapsed_ms} ms | "
+            f"S1={s1['vectors_tested']} WAL vectors (self-check) | "
+            f"S2={s2['vectors_tested']} PNG/JPEG vectors (self-check) | "
+            f"S3={s3['total_vectors_tested']} ISO-7812/13616/9362 internal math vectors"
+        )
     return 0
 
 

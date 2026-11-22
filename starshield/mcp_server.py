@@ -3,16 +3,23 @@
 """
 Deterministic, strictly offline Model Context Protocol (MCP) stdio server for `starshield-forensics`.
 
-Exposes four read-only deterministic tools over JSON-RPC 2.0 (`stdio`):
-  1. `starshield_demo`                    — Clean-room synthetic showcase across all 5 engines
-  2. `starshield_precheck_leveldb`        — Zero-PII GO/PARTIAL/NO_GO Chromium & Electron LevelDB check
-  3. `starshield_inspect_image_tamper`    — PNG/JPEG ICC & Photoshop 8BIM container provenance check
-  4. `starshield_validate_financial_iocs` — Offline Luhn, 89-country IBAN Mod-97, SWIFT/BIC & UK Sort Code validator
+Exposes seven read-only deterministic tools over JSON-RPC 2.0 (`stdio`):
+  1. `starshield_demo`                    — Clean-room synthetic showcase across all 5 engines (keyed HMAC mode)
+  2. `starshield_precheck_leveldb`        — Zero-PII GO/PARTIAL/NO_GO_COMPACTED_OR_UNSUPPORTED LevelDB check
+  3. `starshield_parse_leveldb_log`       — Structural `.log` WAL carver (`<IBAN_GB_9F3A_01>`, zero raw prose)
+  4. `starshield_triage_json`             — Structural exported JSON triage (`<ENTITY_9F3A_01>`, zero raw prose)
+  5. `starshield_inspect_image_tamper`    — PNG/JPEG ICC & 8BIM container structure observation (not tamper proof)
+  6. `starshield_validate_financial_iocs` — Offline Luhn, IBAN, SWIFT, ABA, RF, LEI, TRON & EIP-55 syntax check
+  7. `starshield_inspect_pdf_tamper`      — ISO 32000 PDF container structure & incremental revision observation
 
-Privacy-by-Default Architecture:
-  Unless `--unredacted` is explicitly passed at server startup inside an isolated offline lab,
-  every tool response enforces ephemeral per-session HMAC-SHA256 pseudonymization so raw PII,
-  filenames, local OS paths, and raw file hashes never enter cloud LLM context windows.
+Privacy-by-Default Structural Airlock:
+  `starshield mcp` is NOT a natural-language prompt-injection detector or sanitizer. Instead, default
+  masked mode withholds raw free-form chat/document prose and emits only deterministic structural
+  skeletons (byte offsets, sequence numbers, soft-delete flags, visible numeric currency amounts, and
+  session-tagged `<IBAN_GB_9F3A_01>` / `<TRC20_9F3A_01>` / `<ENTITY_9F3A_01>` placeholders whose IBAN/BIC
+  tokens preserve 2-letter ISO country codes). Note: `starshield_demo` uses keyed HMAC masking
+  (`[REDACTED_HMAC:...]`) while scrubbing CLI `--unredacted` flag hints from prose placeholders.
+  Reverse `detokenize` and `shred-vault` are local CLI commands and are NEVER exposed over MCP.
 """
 
 from __future__ import annotations
@@ -26,14 +33,24 @@ from typing import Any, BinaryIO, Dict, Tuple
 from starshield import __version__
 from starshield.cli import (
     MAX_DEFAULT_MB,
+    SafeDiagnosticError,
     apply_image_redaction,
+    apply_wal_record_redaction,
     build_acquisition_manifest,
     build_demo_report,
+    format_masked_error,
     read_bounded_bytes,
+    triage_exported_chatsvc_json,
 )
 from starshield.image_containers import inspect_image_container
-from starshield.ioc_validators import extract_validated_iocs
-from starshield.leveldb_log import VALID_SCHEMA_MODES, inspect_chromium_storage_path
+from starshield.ioc_validators import VALIDATION_SCOPE_NOTE, extract_validated_iocs
+from starshield.leveldb_log import (
+    VALID_SCHEMA_MODES,
+    inspect_chromium_storage_path,
+    parse_leveldb_wal,
+)
+from starshield.pdf_containers import apply_pdf_redaction, inspect_pdf_container
+from starshield.pseudonymizer import SessionPseudonymizer, extract_currency_amounts
 
 MAX_RPC_FRAME_BYTES = 4 * 1024 * 1024
 SUPPORTED_MCP_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -66,9 +83,12 @@ MCP_TOOLS: list[Dict[str, Any]] = [
         "name": "starshield_precheck_leveldb",
         "title": "Precheck Chromium / Electron Local LevelDB Storage",
         "description": (
-            "Perform a read-only millisecond diagnostic and GO/PARTIAL/NO_GO feasibility check on a "
-            "local Chromium browser or Electron desktop app (VS Code, Slack, Microsoft Teams, Discord, "
-            "WhatsApp Desktop) IndexedDB/LevelDB directory or .log/.ldb file without leaking raw content."
+            "Perform a read-only millisecond diagnostic and GO/PARTIAL/NO_GO_COMPACTED_OR_UNSUPPORTED "
+            "feasibility check on a local Chromium browser (Chrome/Edge/Brave Local Storage & existing "
+            "LevelDB-backed IndexedDB, WhatsApp Web, browser extensions) or Electron desktop app "
+            "(Microsoft Teams, Slack Local Storage) directory or .log/.ldb file without leaking raw "
+            "content. Distinguishes compacted .ldb SSTables and non-LevelDB SQLite stores (such as newly "
+            "created Chrome 156+ IndexedDB stores, while existing LevelDB stores remain in LevelDB)."
         ),
         "inputSchema": {
             "type": "object",
@@ -90,19 +110,77 @@ MCP_TOOLS: list[Dict[str, Any]] = [
         "annotations": _READ_ONLY_ANNOTATIONS,
     },
     {
-        "name": "starshield_inspect_image_tamper",
-        "title": "Inspect PNG/JPEG Screenshot & Receipt Container Provenance",
+        "name": "starshield_parse_leveldb_log",
+        "title": "Parse LevelDB .log WAL Structural Skeleton",
         "description": (
-            "Deterministically verify RFC 2083 PNG chunk CRC32 integrity (IHDR/IDAT/IEND/iCCP) and "
-            "ISO 10918 JPEG APP2 ICC_PROFILE / APP13 Photoshop 8BIM resource blocks for FinTech "
-            "reimbursement, e-commerce receipt, and disputed screenshot pre-screening."
+            "Carve uncompacted Chromium/Electron LevelDB .log write-ahead log records with 32 KiB "
+            "Castagnoli CRC32C (polynomial 0x82F63B78, mask delta 0xA282EAD8) verification. Default masked "
+            "mode withholds raw free-form prose and returns deterministic structural skeletons (offsets, "
+            "soft-delete flags, visible numeric currency amounts, and session-fingerprinted "
+            "<IBAN_GB_XXXX_01> / <ENTITY_XXXX_01> placeholders whose IBAN/BIC tokens expose 2-letter ISO "
+            "country codes)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "log_path": {
+                    "type": "string",
+                    "description": "Local path to a read-only LevelDB .log write-ahead log copy.",
+                },
+                "schema_mode": {
+                    "type": "string",
+                    "enum": list(VALID_SCHEMA_MODES),
+                    "default": "auto",
+                    "description": "JSON record schema filter (default: auto).",
+                },
+            },
+            "required": ["log_path"],
+            "additionalProperties": False,
+        },
+        "annotations": _READ_ONLY_ANNOTATIONS,
+    },
+    {
+        "name": "starshield_triage_json",
+        "title": "Triage Exported Messaging JSON Structural Skeleton",
+        "description": (
+            "Enumerate soft-deleted and edited records in exported messaging JSON artifacts. Default "
+            "masked mode withholds raw chat prose and emits deterministic structural skeletons with "
+            "visible numeric currency amounts and session-fingerprinted <IBAN_GB_XXXX_01> / "
+            "<TRC20_XXXX_01> / <ENTITY_XXXX_01> tokens (IBAN/BIC tokens expose 2-letter ISO country codes)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "json_path": {
+                    "type": "string",
+                    "description": "Local path to an exported messaging or portal JSON file.",
+                },
+                "schema_mode": {
+                    "type": "string",
+                    "enum": list(VALID_SCHEMA_MODES),
+                    "default": "auto",
+                    "description": "JSON record schema filter (default: auto).",
+                },
+            },
+            "required": ["json_path"],
+            "additionalProperties": False,
+        },
+        "annotations": _READ_ONLY_ANNOTATIONS,
+    },
+    {
+        "name": "starshield_inspect_image_tamper",
+        "title": "Inspect PNG/JPEG Container Structure",
+        "description": (
+            "CONTAINER STRUCTURE OBSERVATION ONLY (NOT TAMPER OR FORGERY DETECTION): Deterministically "
+            "verify RFC 2083 PNG chunk CRC32 integrity (IHDR/IDAT/IEND/iCCP) and ISO 10918 JPEG APP2 "
+            "ICC_PROFILE / APP13 Photoshop 8BIM resource blocks alongside benign OS-save caveats."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "image_path": {
                     "type": "string",
-                    "description": "Local path to a PNG or JPEG screenshot, receipt, or attachment.",
+                    "description": "Local path to a PNG or JPEG image file.",
                 },
             },
             "required": ["image_path"],
@@ -112,18 +190,20 @@ MCP_TOOLS: list[Dict[str, Any]] = [
     },
     {
         "name": "starshield_validate_financial_iocs",
-        "title": "Validate Payment & Banking Checksums Offline",
+        "title": "Validate Identifier Checksums Offline",
         "description": (
-            "Scan text offline in <1ms to extract and mathematically verify ISO/IEC 7812 Luhn card "
-            "numbers, 89-country ISO 13616 IBAN Mod-97 accounts, 250-territory ISO 9362 SWIFT/BIC "
-            "codes, and intra-message UK Faster Payments Sort Code + 8-digit Account pairs."
+            "Scan text offline to extract and mathematically verify ISO/IEC 7812 Luhn card numbers, "
+            "89-country ISO 13616 IBAN Mod-97 accounts, 250-territory ISO 9362 SWIFT/BIC codes, UK Sort "
+            "Code + Account pairs, US ABA Routing numbers, ISO 11649 RF Creditor References, ISO 17442 "
+            "LEIs, TRON TRC-20 Base58Check, and Ethereum EIP-55 addresses. "
+            f"{VALIDATION_SCOPE_NOTE}"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": "Text snippet, invoice instruction, or chat note to validate offline.",
+                    "description": "Text snippet to check offline for mathematical identifier syntax.",
                 },
             },
             "required": ["text"],
@@ -131,22 +211,35 @@ MCP_TOOLS: list[Dict[str, Any]] = [
         },
         "annotations": _READ_ONLY_ANNOTATIONS,
     },
+    {
+        "name": "starshield_inspect_pdf_tamper",
+        "title": "Inspect PDF Container Structure & Incremental Save Revisions",
+        "description": (
+            "CONTAINER STRUCTURE OBSERVATION ONLY (NOT TAMPER OR FORGERY DETECTION): Deterministically "
+            "inspect ISO 32000 PDF container structure offline for multi-revision %%EOF / xref / startxref "
+            "incremental save history, Info/XMP producer metadata, and embedded action cues (/JavaScript, "
+            "/Launch, /EmbeddedFiles) alongside benign e-signature, form-fill, and linearization caveats."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pdf_path": {
+                    "type": "string",
+                    "description": "Local path to a PDF document file.",
+                },
+            },
+            "required": ["pdf_path"],
+            "additionalProperties": False,
+        },
+        "annotations": _READ_ONLY_ANNOTATIONS,
+    },
 ]
 
 _KNOWN_TOOL_NAMES = frozenset(tool["name"] for tool in MCP_TOOLS)
-
-
-def _scrub_error_message(raw_msg: str, redact: bool, candidate_paths: Tuple[Path, ...]) -> str:
-    if not redact:
-        return raw_msg
-    safe_msg = raw_msg
-    for cand in candidate_paths:
-        full_str = str(cand)
-        if full_str:
-            safe_msg = safe_msg.replace(full_str, "[REDACTED_PATH]")
-        if cand.name:
-            safe_msg = safe_msg.replace(cand.name, "[REDACTED_FILENAME]")
-    return safe_msg
+_TOOL_ALLOWED_ARGS: Dict[str, frozenset[str]] = {
+    tool["name"]: frozenset(tool["inputSchema"].get("properties", {}).keys())
+    for tool in MCP_TOOLS
+}
 
 
 def _dispatch_tool_call(
@@ -156,22 +249,37 @@ def _dispatch_tool_call(
     redact: bool,
     max_mb: int,
     session_salt: bytes,
+    session_pseudonymizer: SessionPseudonymizer | None = None,
 ) -> Dict[str, Any]:
-    candidate_paths: list[Path] = []
     try:
+        allowed_keys = _TOOL_ALLOWED_ARGS.get(tool_name, frozenset())
+        unexpected_keys = set(arguments.keys()) - allowed_keys
+        if unexpected_keys:
+            if tool_name == "starshield_demo":
+                raise SafeDiagnosticError("starshield_demo accepts no arguments")
+            raise SafeDiagnosticError(
+                "Unexpected tool argument(s) rejected by strict inputSchema (additionalProperties=false)"
+            )
+
+        active_pseudo = session_pseudonymizer if redact else None
+
         if tool_name == "starshield_demo":
-            if arguments:
-                raise ValueError("starshield_demo accepts no arguments")
             payload = build_demo_report(redact=redact, salt=session_salt)
+            if redact:
+                payload = json.loads(
+                    json.dumps(payload, ensure_ascii=False).replace(
+                        "[REDACTED_CONTENT — pass --unredacted to view]",
+                        "[WITHHELD_IN_STRUCTURAL_MCP_MODE — free-form prose withheld by default]",
+                    )
+                )
         elif tool_name == "starshield_precheck_leveldb":
             raw_target = arguments.get("target_path")
             if not isinstance(raw_target, str) or not raw_target.strip():
-                raise ValueError("'target_path' must be a non-empty string")
+                raise SafeDiagnosticError("'target_path' must be a non-empty string")
             schema_mode = arguments.get("schema_mode", "auto")
             if not isinstance(schema_mode, str) or schema_mode not in VALID_SCHEMA_MODES:
-                raise ValueError(f"'schema_mode' must be one of {VALID_SCHEMA_MODES}")
+                raise SafeDiagnosticError(f"'schema_mode' must be one of {VALID_SCHEMA_MODES}")
             target_path = Path(raw_target)
-            candidate_paths.append(target_path)
             pre_report = inspect_chromium_storage_path(
                 target_path,
                 max_mb=max_mb,
@@ -182,12 +290,61 @@ def _dispatch_tool_call(
                 "masked_mode": redact,
                 "precheck_manifest": pre_report,
             }
+        elif tool_name == "starshield_parse_leveldb_log":
+            raw_log = arguments.get("log_path")
+            if not isinstance(raw_log, str) or not raw_log.strip():
+                raise SafeDiagnosticError("'log_path' must be a non-empty string")
+            schema_mode = arguments.get("schema_mode", "auto")
+            if not isinstance(schema_mode, str) or schema_mode not in VALID_SCHEMA_MODES:
+                raise SafeDiagnosticError(f"'schema_mode' must be one of {VALID_SCHEMA_MODES}")
+            log_path = Path(raw_log)
+            raw_bytes = read_bounded_bytes(log_path, max_mb=max_mb, redact=redact)
+            parsed_wal = apply_wal_record_redaction(
+                parse_leveldb_wal(raw_bytes, schema_mode=schema_mode),
+                redact=redact,
+                salt=session_salt,
+                pseudonymizer=active_pseudo,
+            )
+            payload = {
+                "masked_mode": redact,
+                "acquisition_manifest": build_acquisition_manifest(raw_bytes, log_path.name, redact=redact),
+                "leveldb_wal_analysis": parsed_wal,
+            }
+            if active_pseudo is not None:
+                payload["pseudonym_session_id"] = active_pseudo.session_id
+                payload["pseudonym_session_tag"] = active_pseudo.session_tag
+                payload["pseudonym_token_counts"] = active_pseudo.token_counts()
+        elif tool_name == "starshield_triage_json":
+            raw_json_p = arguments.get("json_path")
+            if not isinstance(raw_json_p, str) or not raw_json_p.strip():
+                raise SafeDiagnosticError("'json_path' must be a non-empty string")
+            schema_mode = arguments.get("schema_mode", "auto")
+            if not isinstance(schema_mode, str) or schema_mode not in VALID_SCHEMA_MODES:
+                raise SafeDiagnosticError(f"'schema_mode' must be one of {VALID_SCHEMA_MODES}")
+            json_path = Path(raw_json_p)
+            raw_bytes = read_bounded_bytes(json_path, max_mb=max_mb, redact=redact)
+            parsed_json = json.loads(raw_bytes.decode("utf-8"), parse_int=_parse_bounded_json_int)
+            triaged = triage_exported_chatsvc_json(
+                parsed_json,
+                redact=redact,
+                salt=session_salt,
+                schema_mode=schema_mode,
+                pseudonymizer=active_pseudo,
+            )
+            payload = {
+                "masked_mode": redact,
+                "acquisition_manifest": build_acquisition_manifest(raw_bytes, json_path.name, redact=redact),
+                "triage_result": triaged,
+            }
+            if active_pseudo is not None:
+                payload["pseudonym_session_id"] = active_pseudo.session_id
+                payload["pseudonym_session_tag"] = active_pseudo.session_tag
+                payload["pseudonym_token_counts"] = active_pseudo.token_counts()
         elif tool_name == "starshield_inspect_image_tamper":
             raw_img = arguments.get("image_path")
             if not isinstance(raw_img, str) or not raw_img.strip():
-                raise ValueError("'image_path' must be a non-empty string")
+                raise SafeDiagnosticError("'image_path' must be a non-empty string")
             img_path = Path(raw_img)
-            candidate_paths.append(img_path)
             raw_bytes = read_bounded_bytes(img_path, max_mb=max_mb, redact=redact)
             label = "[REDACTED_IMAGE_LABEL]" if redact else img_path.name
             payload = {
@@ -202,18 +359,45 @@ def _dispatch_tool_call(
         elif tool_name == "starshield_validate_financial_iocs":
             raw_text = arguments.get("text")
             if not isinstance(raw_text, str):
-                raise ValueError("'text' must be a UTF-8 string")
+                raise SafeDiagnosticError("'text' must be a UTF-8 string")
             encoded_len = len(raw_text.encode("utf-8"))
-            if encoded_len > max_mb * 1024 * 1024:
-                raise ValueError(f"Input text exceeds --max-mb={max_mb} safety limit")
+            if encoded_len > int(max_mb) * 1024 * 1024:
+                raise SafeDiagnosticError(f"Input text exceeds --max-mb={int(max_mb)} safety limit")
             payload = {
                 "epistemic_tier": "DERIVED",
                 "masked_mode": redact,
                 "tool_version": f"starshield-forensics/{__version__}",
+                "validation_scope_note": VALIDATION_SCOPE_NOTE,
                 "validated_iocs": extract_validated_iocs(raw_text, redact=redact, salt=session_salt),
             }
+            if active_pseudo is not None:
+                payload["order_preserving_iocs"] = active_pseudo.pseudonymize_iocs_from_text(raw_text)
+                payload["extracted_currency_amounts"] = extract_currency_amounts(raw_text)
+                payload["airlock_visibility_note"] = (
+                    "validated_iocs uses keyed HMAC tokens; order_preserving_iocs preserves 2-letter ISO "
+                    "country codes on IBAN/BIC tokens (<IBAN_CC_...>), and extracted_currency_amounts "
+                    "retains numeric amounts unmasked."
+                )
+                payload["pseudonym_session_tag"] = active_pseudo.session_tag
+                payload["pseudonym_session_id"] = active_pseudo.session_id
+        elif tool_name == "starshield_inspect_pdf_tamper":
+            raw_pdf = arguments.get("pdf_path")
+            if not isinstance(raw_pdf, str) or not raw_pdf.strip():
+                raise SafeDiagnosticError("'pdf_path' must be a non-empty string")
+            pdf_path = Path(raw_pdf)
+            raw_bytes = read_bounded_bytes(pdf_path, max_mb=max_mb, redact=redact)
+            label = "[REDACTED_PDF_LABEL]" if redact else pdf_path.name
+            payload = {
+                "masked_mode": redact,
+                "acquisition_manifest": build_acquisition_manifest(raw_bytes, pdf_path.name, redact=redact),
+                "pdf_container_analysis": apply_pdf_redaction(
+                    inspect_pdf_container(raw_bytes, label),
+                    redact=redact,
+                    salt=session_salt,
+                ),
+            }
         else:  # pragma: no cover
-            raise ValueError("Unsupported tool name")
+            raise SafeDiagnosticError("Unsupported tool name")
 
         return {
             "content": [
@@ -224,11 +408,24 @@ def _dispatch_tool_call(
             ],
             "isError": False,
         }
-    except (OSError, ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
-        if redact and isinstance(exc, UnicodeDecodeError):
-            err_msg = "Input is not valid UTF-8 text (raw byte context suppressed in masked mode)"
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        UnicodeDecodeError,
+        RecursionError,
+        MemoryError,
+    ) as exc:
+        if redact:
+            err_msg = format_masked_error(exc)
         else:
-            err_msg = _scrub_error_message(str(exc), redact=redact, candidate_paths=tuple(candidate_paths))
+            if isinstance(exc, RecursionError):
+                err_msg = "Input exceeded maximum parser nesting depth"
+            elif isinstance(exc, MemoryError):
+                err_msg = "Input exceeded available memory bounds"
+            else:
+                err_msg = str(exc)
         return {
             "content": [
                 {
@@ -246,6 +443,7 @@ def handle_mcp_message(
     redact: bool = True,
     max_mb: int = MAX_DEFAULT_MB,
     session_salt: bytes | None = None,
+    session_pseudonymizer: SessionPseudonymizer | None = None,
 ) -> Dict[str, Any] | None:
     """Process a single parsed JSON-RPC 2.0 message and return a response dict (or None for notifications)."""
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
@@ -281,6 +479,11 @@ def handle_mcp_message(
         }
 
     active_salt = session_salt if session_salt is not None else secrets.token_bytes(32)
+    active_pseudo = (
+        (session_pseudonymizer if session_pseudonymizer is not None else SessionPseudonymizer())
+        if redact
+        else None
+    )
 
     if method == "initialize":
         requested_ver = params.get("protocolVersion")
@@ -297,7 +500,8 @@ def handle_mcp_message(
                 },
                 "instructions": (
                     "Deterministic, strictly offline, read-only digital forensics & container provenance "
-                    "server. Default masked mode applies ephemeral HMAC-SHA256 pseudonymization so raw PII, "
+                    "server. Default masked mode withholds free-form chat/document prose and emits only "
+                    "structural skeletons + session-tagged <CATEGORY_XXXX_NN> placeholders so raw PII, "
                     "filenames, and file hashes never enter LLM context."
                 ),
             },
@@ -322,10 +526,15 @@ def handle_mcp_message(
         tool_name = params.get("name")
         raw_args = params.get("arguments", {})
         if not isinstance(tool_name, str) or tool_name not in _KNOWN_TOOL_NAMES:
+            tool_err_msg = (
+                "Unknown StarShield MCP tool (caller-supplied tool name suppressed in masked mode)"
+                if redact
+                else f"Unknown StarShield MCP tool: {tool_name!r}"
+            )
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32602, "message": f"Unknown StarShield MCP tool: {tool_name!r}"},
+                "error": {"code": -32602, "message": tool_err_msg},
             }
         if raw_args is None:
             raw_args = {}
@@ -341,13 +550,19 @@ def handle_mcp_message(
             redact=redact,
             max_mb=max_mb,
             session_salt=active_salt,
+            session_pseudonymizer=active_pseudo,
         )
         return {"jsonrpc": "2.0", "id": req_id, "result": tool_res}
 
+    method_err_msg = (
+        "Method not found (caller-supplied method suppressed in masked mode)"
+        if redact
+        else f"Method not found: {method}"
+    )
     return {
         "jsonrpc": "2.0",
         "id": req_id,
-        "error": {"code": -32601, "message": f"Method not found: {method}"},
+        "error": {"code": -32601, "message": method_err_msg},
     }
 
 
@@ -418,20 +633,29 @@ def _read_next_rpc_frame(instream: BinaryIO) -> Tuple[bytes | None, str, Dict[st
         return stripped, "line", None
 
 
+def _parse_bounded_json_int(num_str: str) -> int:
+    if len(num_str.lstrip("+-")) > 64:
+        raise ValueError("JSON integer exceeds bounded 64-digit safety limit")
+    return int(num_str)
+
+
 def run_mcp_stdio_server(
     *,
     redact: bool = True,
     max_mb: int = MAX_DEFAULT_MB,
     salt: bytes | None = None,
+    vault_file: Path | None = None,
     instream: BinaryIO | None = None,
     outstream: BinaryIO | None = None,
 ) -> int:
     """Run the deterministic StarShield MCP server over stdio until EOF."""
     if max_mb < 1:
-        raise ValueError("--max-mb safety limit must be >= 1 MiB")
+        raise SafeDiagnosticError("--max-mb safety limit must be >= 1 MiB")
     reader = instream if instream is not None else sys.stdin.buffer
     writer = outstream if outstream is not None else sys.stdout.buffer
     session_salt = salt if salt is not None else secrets.token_bytes(32)
+    session_pseudo = SessionPseudonymizer() if redact else None
+    last_saved_total = 0
 
     while True:
         raw_bytes, framing, frame_err = _read_next_rpc_frame(reader)
@@ -442,14 +666,14 @@ def run_mcp_stdio_server(
             return 0
 
         try:
-            parsed = json.loads((raw_bytes or b"").decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            parsed = json.loads((raw_bytes or b"").decode("utf-8"), parse_int=_parse_bounded_json_int)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError, MemoryError):
             _write_rpc_frame(
                 writer,
                 {
                     "jsonrpc": "2.0",
                     "id": None,
-                    "error": {"code": -32700, "message": "Parse error: invalid UTF-8 JSON"},
+                    "error": {"code": -32700, "message": "Parse error: invalid or over-nested UTF-8 JSON"},
                 },
                 framing,
             )
@@ -460,6 +684,15 @@ def run_mcp_stdio_server(
             redact=redact,
             max_mb=max_mb,
             session_salt=session_salt,
+            session_pseudonymizer=session_pseudo,
         )
+        if (
+            vault_file is not None
+            and redact
+            and session_pseudo is not None
+            and sum(session_pseudo.token_counts().values()) > last_saved_total
+        ):
+            session_pseudo.save_vault_atomic(vault_file)
+            last_saved_total = sum(session_pseudo.token_counts().values())
         if response is not None:
             _write_rpc_frame(writer, response, framing)
