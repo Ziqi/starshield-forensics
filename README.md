@@ -150,7 +150,7 @@ Mount the 8 read-only inspection tools over JSON-RPC 2.0 `stdio` (omit `--vault-
 
 | Subcommand | Input Artifact | Output JSON Summary |
 | :--- | :--- | :--- |
-| `demo` | Built-in synthetic fixtures | Runs clean-room WAL, Snappy `.ldb`/`MANIFEST`, JSON, container, and check-digit showcase (Mode A HMAC) |
+| `demo` | Built-in synthetic fixtures | Runs clean-room WAL, Snappy `.ldb` SSTable, JSON, container, and check-digit showcase (Mode A HMAC) |
 | `precheck <path> [--schema ...]` | Chromium folder or `.log`/`.ldb` | Zero-PII `GO` / `PARTIAL` / `NO_GO_COMPACTED_OR_UNSUPPORTED` feasibility check |
 | `parse-leveldb-log <file.log> [--schema ...]` | Chromium LevelDB `.log` WAL | Physical block CRC32C status, byte-offset-bound carved records, and syntax-checked IOCs |
 | `parse-leveldb-store <dir_or_file> [--schema ...]` | LevelDB folder (`MANIFEST`+`.ldb`+`.log`) or `.ldb` | Reconciles `LIVE_ACTIVE`, `UI_SOFT_DELETED`, and `TOMBSTONED_HISTORICAL_RECOVERED` records across Snappy SSTables & WAL |

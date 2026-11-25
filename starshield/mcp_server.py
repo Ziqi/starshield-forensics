@@ -36,6 +36,7 @@ from starshield import __version__
 from starshield.cli import (
     MAX_DEFAULT_MB,
     SafeDiagnosticError,
+    _guard_vault_not_same_file,
     _parse_bounded_json_int,
     apply_image_redaction,
     apply_wal_record_redaction,
@@ -75,9 +76,10 @@ MCP_TOOLS: list[Dict[str, Any]] = [
         "name": "starshield_demo",
         "title": "Run StarShield Clean-Room Synthetic Demo",
         "description": (
-            "Execute StarShield's 5 deterministic offline triage engines on embedded 100% synthetic "
-            "specification vectors (LevelDB 32KiB CRC32C WAL carving, PNG/JPEG ICC & 8BIM container "
-            "inspection, Luhn/IBAN Mod-97/SWIFT validation, and UTC timestamp corroboration)."
+            "Execute StarShield's 6 deterministic offline triage engines on embedded 100% synthetic "
+            "specification vectors (LevelDB 32KiB CRC32C WAL carving, Snappy .ldb SSTable carving, "
+            "PNG/JPEG ICC & 8BIM container inspection, Luhn/IBAN Mod-97/SWIFT validation, and UTC "
+            "timestamp corroboration)."
         ),
         "inputSchema": {
             "type": "object",
@@ -697,6 +699,15 @@ def _read_next_rpc_frame(instream: BinaryIO) -> Tuple[bytes | None, str, Dict[st
         if not first_line:
             return None, "line", None
         if len(first_line) > MAX_RPC_FRAME_BYTES:
+            if not first_line.endswith(b"\n"):
+                drained = 0
+                while drained < MAX_RPC_FRAME_BYTES:
+                    drain = instream.readline(min(65536, MAX_RPC_FRAME_BYTES - drained))
+                    if not drain:
+                        break
+                    drained += len(drain)
+                    if drain.endswith(b"\n"):
+                        break
             return (
                 b"",
                 "line",
@@ -859,6 +870,12 @@ def run_mcp_stdio_server(
             and sum(session_pseudo.token_counts().values()) > last_saved_total
         ):
             try:
+                call_args = (parsed.get("params") or {}).get("arguments")
+                if isinstance(call_args, dict):
+                    for pk in ("target_path", "log_path", "json_path", "image_path", "pdf_path"):
+                        pv = call_args.get(pk)
+                        if isinstance(pv, str) and pv.strip():
+                            _guard_vault_not_same_file(vault_file, Path(pv))
                 session_pseudo.save_vault_atomic(vault_file)
                 last_saved_total = sum(session_pseudo.token_counts().values())
             except (OSError, ValueError, RecursionError, MemoryError):

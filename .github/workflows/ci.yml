@@ -60,10 +60,10 @@ jobs:
         run: |
           ruff check starshield tests benchmark scripts
           bandit -q -r starshield scripts
-      - name: Run unit & adversarial tests under strict warnings + >=80% statement coverage gate
+      - name: Run unit & adversarial tests under strict warnings + >=85% statement coverage gate
         run: |
           PYTHONDONTWRITEBYTECODE=1 python -W error -m coverage run -m unittest discover -s tests -v
-          python -m coverage report --include="starshield/*" --fail-under=80
+          python -m coverage report --include="starshield/*" --fail-under=85
       - name: Run StarShield-Bench-24 deterministic benchmark & cross-tool validation harness
         run: |
           PYTHONDONTWRITEBYTECODE=1 python -W error benchmark/benchmark_suite.py

@@ -229,17 +229,30 @@ def apply_wal_record_redaction(
             out["file_size_bytes"] = None
         if "target_label" in out:
             out["target_label"] = "[REDACTED_TARGET_PATH]"
-        if (
-            "manifest_comparator" in out
-            and out["manifest_comparator"] is not None
-            and out["manifest_comparator"] not in {"leveldb.BytewiseComparator", "idb_cmp1"}
-        ):
-            out["manifest_comparator"] = "[REDACTED_CUSTOM_COMPARATOR]"
-        for c_blk in out.get("corrupted_blocks_or_frames", []):
-            if isinstance(c_blk, dict) and "source_file" in c_blk:
-                c_blk["source_file"] = "[REDACTED_SOURCE_FILE]"
-    for rec in out["recovered_records"]:
-        raw_txt = rec["cached_content"]
+        if "manifest_comparator" in out and out["manifest_comparator"] is not None:
+            comp_parts = [p.strip() for p in str(out["manifest_comparator"]).split(",") if p.strip()]
+            if not comp_parts or any(p not in {"leveldb.BytewiseComparator", "idb_cmp1"} for p in comp_parts):
+                out["manifest_comparator"] = "[REDACTED_CUSTOM_COMPARATOR]"
+        if "corrupted_blocks_or_frames" in out and isinstance(out["corrupted_blocks_or_frames"], list):
+            safe_corr_list: List[Dict[str, Any]] = []
+            for c_blk in out["corrupted_blocks_or_frames"]:
+                if isinstance(c_blk, dict):
+                    projected: Dict[str, Any] = {}
+                    for sk in ("byte_offset", "block_index", "record_type", "offset", "length"):
+                        if sk in c_blk and isinstance(c_blk[sk], int) and not isinstance(c_blk[sk], bool):
+                            projected[sk] = c_blk[sk]
+                    if "reason" in c_blk:
+                        projected["reason"] = "[REDACTED_CORRUPTION_REASON]" if (
+                            "@" in str(c_blk["reason"]) or "://" in str(c_blk["reason"]) or "/" in str(c_blk["reason"])
+                        ) else str(c_blk["reason"])[:240]
+                    if "source_file" in c_blk:
+                        projected["source_file"] = "[REDACTED_SOURCE_FILE]"
+                    safe_corr_list.append(projected)
+                else:
+                    safe_corr_list.append({"reason": "[REDACTED_CORRUPTION_ENTRY]"})
+            out["corrupted_blocks_or_frames"] = safe_corr_list
+    for rec in out.get("recovered_records", []):
+        raw_txt = str(rec.get("cached_content") or "")
         if redact and pseudonymizer is not None:
             rec["extracted_iocs"] = pseudonymizer.pseudonymize_iocs_from_text(raw_txt)
         else:
@@ -249,7 +262,7 @@ def apply_wal_record_redaction(
                 rec["source_file"] = "[REDACTED_SOURCE_FILE]"
             rec["key_sha256"] = "[OMITTED_IN_MASKED_MODE]"
             rec["value_sha256"] = "[OMITTED_IN_MASKED_MODE]"
-            rec["message_id"] = redact_msg_id(rec["message_id"], salt=run_salt)
+            rec["message_id"] = redact_msg_id(str(rec.get("message_id") or ""), salt=run_salt)
             if pseudonymizer is not None:
                 rec["sender_mri"] = (
                     pseudonymizer.assign("ENTITY", str(rec["sender_mri"]))
@@ -261,11 +274,11 @@ def apply_wal_record_redaction(
                     "[WITHHELD_IN_STRUCTURAL_MCP_MODE — free-form prose withheld by default]"
                 )
             else:
-                rec["sender_mri"] = mask_identifier(rec["sender_mri"], salt=run_salt)
+                rec["sender_mri"] = mask_identifier(str(rec.get("sender_mri") or ""), salt=run_salt)
                 rec["cached_content"] = "[REDACTED_CONTENT]"
-            rec["composetime"] = redact_timestamp(rec["composetime"])
-            rec["deletetime"] = redact_timestamp(rec["deletetime"])
-            rec["edittime"] = redact_timestamp(rec["edittime"])
+            rec["composetime"] = redact_timestamp(rec.get("composetime"))
+            rec["deletetime"] = redact_timestamp(rec.get("deletetime"))
+            rec["edittime"] = redact_timestamp(rec.get("edittime"))
     out["ioc_validation_scope_note"] = VALIDATION_SCOPE_NOTE
     return out
 
@@ -689,25 +702,86 @@ def build_demo_report(redact: bool = True, salt: bytes | None = None) -> Dict[st
 
 
 def _guard_vault_not_same_file(vault_file: Path | None, input_file: Path | None) -> None:
-    """Reject `--vault-file` if it is a symlink or points to the same filesystem inode as an input artifact."""
+    """Reject `--vault-file` if it is a symlink/hardlink, aliases an input inode, or sits inside a target directory."""
     if vault_file is None:
         return
+    st_v: os.stat_result | None = None
     try:
         st_v = os.lstat(vault_file)
-    except OSError:
-        return
-    if stat.S_ISLNK(st_v.st_mode):
-        raise OSError("Refusing to write token vault through a symbolic link")
+    except FileNotFoundError:
+        st_v = None
+    except OSError as exc:
+        raise SafeDiagnosticError("Unable to verify token vault target path safety") from exc
+
+    if st_v is not None:
+        if stat.S_ISLNK(st_v.st_mode):
+            raise SafeDiagnosticError("Refusing to write token vault through a symbolic link")
+        if st_v.st_nlink > 1:
+            raise SafeDiagnosticError("Refusing to write token vault to a multi-hardlink target")
+
     if input_file is None:
         return
+    in_target = Path(os.path.expanduser(str(input_file)))
     try:
-        st_i = os.lstat(input_file)
-    except OSError:
+        st_i_lstat = os.lstat(in_target)
+    except FileNotFoundError:
         return
-    if os.path.samestat(st_v, st_i):
+    except OSError as exc:
+        raise SafeDiagnosticError("Unable to verify input artifact path for token vault safety") from exc
+
+    st_i_stat: os.stat_result | None = None
+    try:
+        st_i_stat = os.stat(in_target)
+    except FileNotFoundError:
+        st_i_stat = None
+    except OSError as exc:
+        raise SafeDiagnosticError("Unable to resolve input artifact target for token vault safety") from exc
+
+    if st_v is not None and (
+        os.path.samestat(st_v, st_i_lstat)
+        or (st_i_stat is not None and os.path.samestat(st_v, st_i_stat))
+    ):
         raise SafeDiagnosticError(
-            "Refusing to overwrite existing file: target is not a valid starshield-token-vault/v1 file"
+            "Refusing to overwrite existing file: vault path aliases input artifact (not a valid starshield-token-vault/v1 file)"
         )
+
+    dir_targets = [s for s in (st_i_lstat, st_i_stat) if s is not None and stat.S_ISDIR(s.st_mode)]
+    if dir_targets:
+        anc = Path(os.path.abspath(os.path.expanduser(str(vault_file))))
+        deepest_existing: Path | None = None
+        probe = anc
+        while True:
+            try:
+                os.stat(probe)
+                deepest_existing = probe
+                break
+            except FileNotFoundError:
+                if probe == probe.parent:
+                    break
+                probe = probe.parent
+            except OSError as exc:
+                raise SafeDiagnosticError("Unable to verify token vault ancestor directory safety") from exc
+
+        anc_candidates: List[Path] = []
+        if deepest_existing is not None:
+            for start_p in (deepest_existing, Path(os.path.realpath(deepest_existing))):
+                cur = start_p
+                while True:
+                    anc_candidates.append(cur)
+                    if cur == cur.parent:
+                        break
+                    cur = cur.parent
+
+        for cand in anc_candidates:
+            try:
+                st_anc = os.stat(cand)
+            except OSError as exc:
+                raise SafeDiagnosticError("Unable to stat token vault ancestor directory") from exc
+            for dt_st in dir_targets:
+                if os.path.samestat(st_anc, dt_st):
+                    raise SafeDiagnosticError(
+                        "Refusing to create or write token vault inside the target evidence directory"
+                    )
 
 
 def run_demo(redact: bool = True, salt: bytes | None = None) -> int:

@@ -30,7 +30,7 @@ SPDX-License-Identifier: MIT
 | :--- | :--- |
 | **Subject Tool & Version** | `starshield-forensics v0.4.0` (`0` third-party runtime dependencies) |
 | **Validation Harness** | [`scripts/verify_cross_tool_forensics.py`](scripts/verify_cross_tool_forensics.py) (`starshield-cross-tool-validation/v1`) |
-| **Deterministic Zipapp (`starshield.pyz`)** | `19795b019d1f7f605f9bf7f17ba886bd261311faeac24bdb8488724c03086272` *(depends solely on `starshield/` runtime sources; verified in CI via `scripts/build_reproducible.py --verify`)* |
+| **Deterministic Zipapp (`starshield.pyz`)** | `2a33b6376f8e0ea256b7736315ed0dd4dc381f664992a064ca164fbac39c5494` *(depends solely on `starshield/` runtime sources; pairwise rebuild equality verified via `scripts/build_reproducible.py --verify`, and exact golden digest enforced in CI & release attestation via `scripts/generate_spdx_sbom.py --verify --verify-pyz` and `.github/workflows/attestations.yml`)* |
 | **Source Tarball (`sdist`), Wheel & SPDX 2.3 SBOM** | Cryptographically bound by the release-attached offline Ed25519-signed manifest `SHA256SUMS` + `SHA256SUMS.sig` (verified against [`KEYS.pub`](KEYS.pub)), GitHub Release Sigstore provenance (`multiple.intoto.jsonl`), and PyPI Trusted Publisher PEP 740 attestations *(archive digests are not duplicated inline in repository markdown to prevent post-build hash drift or self-referential tarball circularity)* |
 | **Zenodo Concept DOI** | [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) *(currently resolves to archived `v0.3.7`: `10.5281/zenodo.24156262`)* |
 | **Reference Python Runtime** | CPython `3.12.13` (`Darwin-arm64` QA venv) + Ubuntu GitHub Actions CI matrix (`3.10`, `3.11`, `3.12`, `3.13`) |

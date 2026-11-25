@@ -54,7 +54,10 @@ jobs:
           mkdir -p dist /tmp/release-sig
           python scripts/build_reproducible.py --verify --output dist/starshield.pyz
           if [[ "$TAG" == "v0.4.0" ]]; then
-            echo "19795b019d1f7f605f9bf7f17ba886bd261311faeac24bdb8488724c03086272  dist/starshield.pyz" | sha256sum -c -
+            echo "2a33b6376f8e0ea256b7736315ed0dd4dc381f664992a064ca164fbac39c5494  dist/starshield.pyz" | sha256sum -c -
+          else
+            echo "Refusing unpinned release tag $TAG: update pinned starshield.pyz SHA-256 before attestation" >&2
+            exit 1
           fi
 
           curl -fsSL -o /tmp/release-sig/SHA256SUMS "${BASE_URL}/SHA256SUMS"

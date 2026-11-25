@@ -79,7 +79,14 @@ _XREF_STREAM_RE = re.compile(
     rb"(?=[\x00\t\n\x0c\r ()<>\[\]{}/%]|$)"
 )
 _TOP_PDF_LEX_RE = re.compile(
-    rb"\d{1,10}[\x00\t\n\x0c\r ]+\d{1,5}[\x00\t\n\x0c\r ]+obj\b|\bendobj\b|<<|>>|[()%\[\]<>]"
+    rb"\d{1,10}[\x00\t\n\x0c\r ]+\d{1,5}[\x00\t\n\x0c\r ]+obj\b|\b(?:endobj|xref|trailer|startxref)\b|<<|>>|[()%\[\]<>]"
+)
+_OBJ_BOUND_LEX_RE = re.compile(
+    rb"(?:%[^\r\n]*[\r\n]?|\([^()\\\r\n]*\))+|"
+    rb"\d{1,10}[\x00\t\n\x0c\r ]+\d{1,5}[\x00\t\n\x0c\r ]+obj\b|\bendobj\b|<<|[%(<]"
+)
+_REAL_XREF_SUBSECT_RE = re.compile(
+    rb"(?:[\x00\t\n\x0c\r ]|%[^\r\n]*[\r\n])+\d{1,10}(?:[\x00\t\n\x0c\r ]|%[^\r\n]*[\r\n])+\d{1,10}(?=[\x00\t\n\x0c\r %])"
 )
 _STR_PDF_LEX_RE = re.compile(rb"(?:\\.)+|[()]", re.DOTALL)
 
@@ -95,7 +102,7 @@ _FAST_INTERESTING_RE = re.compile(
     rb"/[^\x00\t\n\x0c\r ()<>\[\]{}/%#]*#"
 )
 _LEX_TRIGGER_RE = re.compile(
-    rb"(?:%[^\r\n]*[\r\n]?|\([^()\\\r\n]*\)|</)+|"
+    rb"(?:%[^\r\n]*[\r\n]?|\([^()\\\r\n]*\))+|"
     rb"<<|>>|\d{1,10}[\x00\t\n\x0c\r ]+\d{1,5}[\x00\t\n\x0c\r ]+obj\b|\bendobj\b|\bendstream\b|"
     rb"[%(<]|"
     rb"/(?:Producer|Creator|Author|Title|Subject|CreationDate|ModDate|"
@@ -114,7 +121,7 @@ _TOP_RESET_RE = re.compile(
     rb"(?:^|[\x00\t\n\x0c\r >)\]])(?P<kw>\d{1,10}[\x00\t\n\x0c\r ]+\d{1,5}[\x00\t\n\x0c\r ]+obj\b|endobj\b|endstream\b)"
 )
 _STAGE2_OBJ_RESYNC_RE = re.compile(
-    rb"(?:^|[\x00\t\n\x0c\r >)\]])(?P<kw>\d{1,10}[\x00\t\n\x0c\r ]+\d{1,5}[\x00\t\n\x0c\r ]+obj\b|endobj\b|stream\r?\n|endstream\b)"
+    rb"(?:>>[\x00\t\n\x0c\r ]*(?P<stkw>stream\r?\n)|(?:^|[\x00\t\n\x0c\r >)\]])(?P<kw>\d{1,10}[\x00\t\n\x0c\r ]+\d{1,5}[\x00\t\n\x0c\r ]+obj\b|endobj\b|endstream\b))"
 )
 _NAME_BODY_END_RE = re.compile(rb"[\x00\t\n\x0c\r ()<>\[\]{}/%]")
 _AFTER_ENDSTREAM_STRUCT_RE = re.compile(
@@ -765,7 +772,7 @@ def _find_earliest_stage2_resync(buf: bytes, s_start: int, s_end: int) -> int | 
             win_hi = min(s_end, hit + kw_len + 12)
             m = _STAGE2_OBJ_RESYNC_RE.search(buf, win_lo, win_hi)
             if m is not None:
-                kw_off = m.start("kw")
+                kw_off = m.start("kw") if m.group("kw") is not None else m.start("stkw")
                 if kw_off >= s_start and (earliest is None or kw_off < earliest):
                     earliest = kw_off
                     break
@@ -931,15 +938,6 @@ class _StreamDictTracker:
                     self.lex_pos = tok_end
                     continue
                 if not self.open_stack:
-                    if self.in_indirect_obj:
-                        ind_end, ind_closed = _scan_pdf_literal_string(
-                            raw,
-                            tok_start,
-                            max_scan=max(0, min(stream_pos - tok_start - 1, MAX_PDF_STRING_SCAN_BYTES)),
-                        )
-                        if ind_closed:
-                            self.lex_pos = ind_end
-                            continue
                     resync_hi = min(stream_pos, tok_start + 1 + MAX_STREAM_DICT_BYTES)
                     resync_off = _find_earliest_stage2_resync(raw, tok_start + 1, resync_hi)
                     if not self.in_indirect_obj:
@@ -1023,7 +1021,11 @@ class _StreamDictTracker:
                 ):
                     self.open_stack.clear()
                     self.last_closed_dict = None
-                    self.in_indirect_obj = raw[tok_end - 3 : tok_end] == b"obj" and raw[tok_start : tok_start + 3] != b"end"
+                    tok_bytes = raw[tok_start:tok_end]
+                    if tok_bytes == b"endobj":
+                        self.in_indirect_obj = False
+                    elif tok_bytes != b"endstream" and tok_bytes.endswith(b"obj"):
+                        self.in_indirect_obj = True
                 self.lex_pos = tok_end
 
         if self.open_stack or self.last_closed_dict is None:
@@ -1159,7 +1161,6 @@ def _scan_pdf_lexical_tokens(
     span_idx = 0
     num_spans = len(spans)
     dict_depth = 0
-    in_indirect_obj = False
 
     while pos < n:
         while span_idx < num_spans and pos >= spans[span_idx][1]:
@@ -1203,37 +1204,21 @@ def _scan_pdf_lexical_tokens(
         if 0x30 <= lead <= 0x39:  # 'N G obj'
             if idx == 0 or (buf[idx - 1] in _PDF_WS_OR_DELIM and buf[idx - 1] != 0x2F):
                 dict_depth = 0
-                in_indirect_obj = True
             pos = m.end()
             continue
         if lead == ord("e"):  # 'endobj' or 'endstream'
             if idx == 0 or (buf[idx - 1] in _PDF_WS_OR_DELIM and buf[idx - 1] != 0x2F):
                 dict_depth = 0
-                if buf[idx : m.end()] == b"endobj":
-                    in_indirect_obj = False
             pos = m.end()
             continue
 
-        if (
-            lead == 0x25
-            or (lead == 0x3C and m.end() - idx >= 2)
-            or (lead == 0x28 and m.end() - idx >= 2)
-        ):  # batched '%', '</', or single-line flat `(...)`
+        if lead == 0x25 or (lead == 0x28 and m.end() - idx >= 2):  # batched '%' or single-line flat `(...)`
             pos = m.end()
             continue
 
         if lead == 0x28:  # multi-line, nested, escaped, or unclosed '(' literal string
             win_hi = min(seg_end, idx + 1 + MAX_STREAM_DICT_BYTES)
             if dict_depth == 0:
-                if in_indirect_obj:
-                    ind_end, ind_closed = _scan_pdf_literal_string(
-                        buf,
-                        idx,
-                        max_scan=max(0, min(seg_end - idx - 1, MAX_PDF_STRING_SCAN_BYTES)),
-                    )
-                    if ind_closed:
-                        pos = ind_end
-                        continue
                 resync_off = _find_earliest_stage2_resync(buf, idx + 1, win_hi)
                 if resync_off is not None:
                     sub_end, sub_closed = _scan_pdf_literal_string(
@@ -1484,6 +1469,81 @@ def _build_non_stream_windows(n: int, skip_spans: List[tuple[int, int]] | None) 
     return windows
 
 
+def _has_real_startxref_eof(raw: bytes, after_kw: int, limit: int) -> bool:
+    """Bounded O(1) check (`<= 256` bytes, zero regex backtracking) for `startxref <ws> <offset> <ws> %%EOF`."""
+    bound = min(len(raw), limit, after_kw + 256)
+    p = _skip_ws_and_comments(raw, after_kw, bound)
+    d_start = p
+    while p < bound and 0x30 <= raw[p] <= 0x39:
+        p += 1
+    if p == d_start or (p - d_start) > MAX_STARTXREF_DIGITS:
+        return False
+    p = _skip_ws_and_comments(raw, p, bound)
+    if p + 5 > len(raw) or raw[p : p + 5] != b"%%EOF":
+        return False
+    return p + 5 >= len(raw) or raw[p + 5] in _PDF_WS_BYTES
+
+
+def _find_next_lexical_obj_boundary(
+    raw: bytes,
+    search_from: int,
+    non_stream_wins: List[tuple[int, int]],
+) -> tuple[int, bytes]:
+    """
+    Find the next genuine lexical `endobj` or `N G obj` boundary after `search_from`,
+    skipping `raw_stream_spans`, `%...EOL` comments, `(...)` strings, `<hex>` strings, and `/endobj` names.
+    """
+    n = len(raw)
+    for w_lo, w_hi in non_stream_wins:
+        if w_hi <= search_from:
+            continue
+        q = max(w_lo, search_from)
+        while q < w_hi:
+            bm = _OBJ_BOUND_LEX_RE.search(raw, q, w_hi)
+            if bm is None:
+                break
+            b_idx = bm.start()
+            b_tok = bm.group(0)
+            if b_tok[0] == 0x25 or (b_tok[0] == 0x28 and len(b_tok) >= 2):
+                q = bm.end()
+                continue
+            if b_tok == b"(":
+                p_depth = 1
+                sq = b_idx + 1
+                while sq < w_hi and p_depth > 0:
+                    sm = _STR_PDF_LEX_RE.search(raw, sq, w_hi)
+                    if sm is None:
+                        sq = w_hi
+                        break
+                    st_tok = sm.group(0)
+                    if st_tok == b"(":
+                        p_depth += 1
+                        sq = sm.start() + 1
+                    elif st_tok == b")":
+                        p_depth -= 1
+                        sq = sm.start() + 1
+                    else:
+                        sq = sm.end()
+                q = sq
+                continue
+            if b_tok == b"<<":
+                q = b_idx + 2
+                continue
+            if b_tok == b"<":
+                nm = _NON_HEX_WS_RE.search(raw, b_idx + 1, w_hi)
+                if nm is None:
+                    q = w_hi
+                elif raw[nm.start()] == 0x3E:
+                    q = nm.start() + 1
+                else:
+                    q = nm.start()
+                continue
+            if b_idx == 0 or (raw[b_idx - 1] in _PDF_WS_OR_DELIM and raw[b_idx - 1] != 0x2F):
+                return (b_idx, b"endobj" if b_tok == b"endobj" else b"obj")
+            q = bm.end()
+    return (n + 1, b"")
+
+
 def _scan_structural_eof_offsets(
     raw: bytes,
     raw_stream_spans: List[tuple[int, int]],
@@ -1510,10 +1570,24 @@ def _scan_structural_eof_offsets(
     n = len(raw)
     scan_start = header_offset if header_offset > 0 else 0
     in_obj = False
+    last_obj_offset = scan_start
+    last_open_delim_offset = scan_start
     dict_depth = 0
     array_depth = 0
 
-    for win_lo, win_hi in _build_non_stream_windows(n, raw_stream_spans):
+    non_stream_wins = _build_non_stream_windows(n, raw_stream_spans)
+    cached_bound_pos = -1
+    cached_bound_kind = b""
+
+    def _has_closing_endobj_from(probe_offset: int) -> bool:
+        nonlocal cached_bound_pos, cached_bound_kind
+        if probe_offset > cached_bound_pos:
+            cached_bound_pos, cached_bound_kind = _find_next_lexical_obj_boundary(
+                raw, probe_offset, non_stream_wins
+            )
+        return cached_bound_kind == b"endobj"
+
+    for win_lo, win_hi in non_stream_wins:
         if win_hi <= scan_start:
             continue
         if win_lo < scan_start:
@@ -1567,6 +1641,8 @@ def _scan_structural_eof_offsets(
                 if top_start is not None and top_start < idx:
                     top_trailer_windows.append((top_start, idx))
                 top_start = None
+                if dict_depth == 0 and array_depth == 0:
+                    last_open_delim_offset = idx
                 dict_depth += 1
                 pos = idx + 2
                 continue
@@ -1581,6 +1657,13 @@ def _scan_structural_eof_offsets(
                 if top_start is not None and top_start < idx:
                     top_trailer_windows.append((top_start, idx))
                 top_start = None
+                if dict_depth == 0 and array_depth == 0:
+                    last_open_delim_offset = idx
+                if not in_obj and dict_depth == 0 and add_error is not None:
+                    add_error(
+                        idx,
+                        "Unexpected top-level PDF '[' array delimiter outside indirect object or trailer dictionary",
+                    )
                 array_depth += 1
                 pos = idx + 1
                 continue
@@ -1593,6 +1676,11 @@ def _scan_structural_eof_offsets(
                 continue
             if tok == b"endobj":
                 if idx == 0 or (raw[idx - 1] in _PDF_WS_OR_DELIM and raw[idx - 1] != 0x2F):
+                    if (dict_depth > 0 or array_depth > 0) and add_error is not None:
+                        add_error(
+                            idx,
+                            "Unclosed PDF dictionary or array before 'endobj'",
+                        )
                     in_obj = False
                     dict_depth = 0
                     array_depth = 0
@@ -1602,12 +1690,48 @@ def _scan_structural_eof_offsets(
                 else:
                     pos = m.end()
                 continue
+            if tok in (b"xref", b"trailer", b"startxref"):
+                is_delim_ok = idx == 0 or (raw[idx - 1] in _PDF_WS_OR_DELIM and raw[idx - 1] != 0x2F)
+                if is_delim_ok:
+                    if not in_obj and dict_depth == 0 and array_depth == 0:
+                        is_real_trailer_hdr = True
+                    elif (
+                        (
+                            tok == b"xref"
+                            and _REAL_XREF_SUBSECT_RE.match(raw, m.end(), min(win_hi, m.end() + 256))
+                            is not None
+                        )
+                        or (tok == b"startxref" and _has_real_startxref_eof(raw, m.end(), win_hi))
+                    ) and (not in_obj or not _has_closing_endobj_from(m.end())):
+                        is_real_trailer_hdr = True
+                    else:
+                        is_real_trailer_hdr = False
+
+                    if is_real_trailer_hdr:
+                        if (in_obj or dict_depth > 0 or array_depth > 0) and add_error is not None:
+                            add_error(
+                                idx,
+                                "Unclosed PDF object, dictionary, or array before trailer/xref section",
+                            )
+                        in_obj = False
+                        dict_depth = 0
+                        array_depth = 0
+                        if top_start is None:
+                            top_start = idx
+                pos = m.end()
+                continue
             if 0x30 <= tok[0] <= 0x39:  # 'N G obj'
                 if idx == 0 or (raw[idx - 1] in _PDF_WS_OR_DELIM and raw[idx - 1] != 0x2F):
+                    if in_obj and add_error is not None:
+                        add_error(
+                            idx,
+                            "Indirect PDF object missing 'endobj' before next object header",
+                        )
                     if top_start is not None and top_start < idx:
                         top_trailer_windows.append((top_start, idx))
                     top_start = None
                     in_obj = True
+                    last_obj_offset = idx
                     dict_depth = 0
                     array_depth = 0
                 pos = m.end()
@@ -1618,8 +1742,8 @@ def _scan_structural_eof_offsets(
                 if top_start is not None and top_start < idx:
                     top_trailer_windows.append((top_start, idx))
                 top_start = None
-                close_gt = raw.find(b">", idx + 1, win_hi)
-                if close_gt == -1:
+                nm = _NON_HEX_WS_RE.search(raw, idx + 1, win_hi)
+                if nm is None:
                     if add_error is not None:
                         add_error(
                             idx,
@@ -1627,13 +1751,18 @@ def _scan_structural_eof_offsets(
                         )
                     pos = win_hi
                     code_start = win_hi
+                elif raw[nm.start()] == 0x3E:
+                    pos = nm.start() + 1
+                    code_start = pos
+                    if not in_obj and dict_depth == 0 and array_depth == 0:
+                        top_start = pos
                 else:
-                    if _NON_HEX_WS_RE.search(raw, idx + 1, close_gt) is not None and add_error is not None:
+                    if add_error is not None:
                         add_error(
                             idx,
                             "Malformed non-hexadecimal character inside PDF '<...>' string",
                         )
-                    pos = close_gt + 1
+                    pos = nm.start()
                     code_start = pos
                     if not in_obj and dict_depth == 0 and array_depth == 0:
                         top_start = pos
@@ -1649,13 +1778,22 @@ def _scan_structural_eof_offsets(
                 top_trailer_windows.append((top_start, idx))
             top_start = None
 
-            is_top_level = not in_obj and dict_depth == 0 and array_depth == 0
-            if (
-                is_top_level
-                and raw[idx : idx + 5] == b"%%EOF"
+            is_eof_token = (
+                raw[idx : idx + 5] == b"%%EOF"
                 and (idx == 0 or raw[idx - 1] in _PDF_WS_BYTES or raw[idx - 1] in b")>]}")
                 and (idx + 5 >= n or raw[idx + 5] in _PDF_WS_BYTES)
-            ):
+            )
+            if is_eof_token and dict_depth == 0 and array_depth == 0 and in_obj:
+                if not _has_closing_endobj_from(idx + 5):
+                    if add_error is not None:
+                        add_error(
+                            idx,
+                            "Indirect PDF object missing 'endobj' before %%EOF marker",
+                        )
+                    in_obj = False
+
+            is_top_level = not in_obj and dict_depth == 0 and array_depth == 0
+            if is_top_level and is_eof_token:
                 total_eof_count += 1
                 last_eof_offset = idx
                 if len(eof_offsets) < MAX_CONTAINER_MARKERS:
@@ -1688,6 +1826,17 @@ def _scan_structural_eof_offsets(
                 open_paren_offset,
                 "Unterminated PDF literal string '(' encountered during structural trailer scan",
             )
+
+    if in_obj and add_error is not None:
+        add_error(
+            last_obj_offset,
+            "Unterminated indirect PDF object (missing 'endobj' at EOF)",
+        )
+    elif (dict_depth > 0 or array_depth > 0) and add_error is not None:
+        add_error(
+            last_open_delim_offset,
+            "Unterminated PDF dictionary or array delimiter at EOF",
+        )
 
     return eof_offsets, total_eof_count, last_eof_offset, code_windows, top_trailer_windows
 

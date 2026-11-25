@@ -28,14 +28,20 @@ import contextlib
 import io
 import json
 import struct
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from starshield import __version__
-from starshield.cli import main as cli_main
-from starshield.ioc_validators import extract_validated_iocs
-from starshield.leveldb_log import (
+_REPO_ROOT_STR = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT_STR not in sys.path:
+    sys.path.insert(0, _REPO_ROOT_STR)
+
+from starshield import __version__  # noqa: E402
+from starshield.cli import main as cli_main  # noqa: E402
+from starshield.ioc_validators import extract_validated_iocs  # noqa: E402
+from starshield.leveldb_log import (  # noqa: E402
     LEVELDB_SSTABLE_MAGIC_LE,
     REC_FULL,
     SafeDiagnosticError,
@@ -47,7 +53,7 @@ from starshield.leveldb_log import (
     inspect_chromium_storage_path,
     mask_crc32c,
 )
-from starshield.leveldb_sstable import (
+from starshield.leveldb_sstable import (  # noqa: E402
     COMPRESSION_ZSTD,
     _decode_chromium_string_prefixed,
     _encode_sstable_block,
@@ -62,9 +68,9 @@ from starshield.leveldb_sstable import (
     parse_leveldb_store,
     unpack_internal_key,
 )
-from starshield.mcp_server import run_mcp_stdio_server
-from starshield.pdf_containers import inspect_pdf_container
-from starshield.pseudonymizer import extract_currency_amounts
+from starshield.mcp_server import run_mcp_stdio_server  # noqa: E402
+from starshield.pdf_containers import inspect_pdf_container  # noqa: E402
+from starshield.pseudonymizer import extract_currency_amounts  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -184,6 +190,8 @@ class TestV040SSTableAndFixes(unittest.TestCase):
 
         by_id = {r["message_id"]: r for r in store_lab["recovered_records"]}
         self.assertEqual(by_id["chal_msg_orphan_8900"]["source_kind"], "orphan_sstable")
+        self.assertEqual(by_id["chal_msg_orphan_8900"]["retention_state"], "TOMBSTONED_HISTORICAL_RECOVERED")
+        self.assertTrue(by_id["chal_msg_orphan_8900"]["evicted_from_manifest"])
         self.assertEqual(by_id["chal_msg_tombstoned_9001"]["retention_state"], "TOMBSTONED_HISTORICAL_RECOVERED")
         self.assertTrue(by_id["chal_msg_tombstoned_9001"]["superseded_by_tombstone"])
         self.assertEqual(by_id["chal_msg_tombstoned_9001"]["superseded_by_sequence"], 9020)
@@ -236,7 +244,7 @@ class TestV040SSTableAndFixes(unittest.TestCase):
             mcp_inner = json.loads(json.loads(mcp_raw)["result"]["content"][0]["text"])
             self.assertEqual(
                 mcp_inner["leveldb_store_analysis"]["tombstoned_historical_recovered_count"],
-                1,
+                2,
             )
 
     def test_04_compacted_only_go_precheck_overwrite_history_localstorage_kv_and_blob_warning(self) -> None:
@@ -301,7 +309,7 @@ class TestV040SSTableAndFixes(unittest.TestCase):
             b"MIME_PREAMBLE /JavaScript (\n"
             b"%PDF-1.5\n"
             b"1 0 obj\n[ /Name startxref 0 %%EOF\nxref\n ]\nendobj\n"
-            b"2 0 obj\n(\nMulti-line indirect string mentioning\n1 0 obj and endobj safely\n)\nendobj\n"
+            b"2 0 obj\n(\nMulti-line indirect string\nspanning lines safely\n)\nendobj\n"
             b"3 0 obj\n<< /Type /XRef /Size 4 >>\nendobj\n"
             b"trailer\n<< /Root 1 0 R /Fake [ startxref 0 %%EOF\n] >>\n"
             b"startxref\n26\n%%EOF\n"
@@ -419,17 +427,9 @@ class TestV040SSTableAndFixes(unittest.TestCase):
             b"\x00\x09\x01XY" + struct.pack("<II", 0, 1),  # truncated KV payload
         ):
             with self.assertRaises(ValueError):
-                _iter_sstable_block_entries(bad_blk)
+                list(_iter_sstable_block_entries(bad_blk))
 
-        # 3. Chromium prefixed string decoder edge cases
-        self.assertIsNone(_decode_chromium_string_prefixed(b""))
-        self.assertEqual(_decode_chromium_string_prefixed(b"\x01 Caf\xe9_Latin1 "), "Café_Latin1")
-        self.assertIsNone(_decode_chromium_string_prefixed(b"\x00\x00\xd8"))  # unpaired UTF-16LE surrogate
-        self.assertIsNone(_decode_chromium_string_prefixed(b"\xfe\xff\x80"))  # invalid UTF-8
-        self.assertIsNone(_decode_chromium_string_prefixed(b"x"))  # <2 chars after strip
-        self.assertIsNone(_decode_chromium_string_prefixed(b"\x01\x02\x03\x04\x05A"))  # low printable ratio
-
-        # 4. Multi-block SSTable (`restart_interval=2`, `block_target_bytes=64`), budget exhaustion, & corrupt footers
+        # Cumulative Snappy decompression budget circuit breaker
         multi_entries = [
             (
                 f"idb:multi:{idx:02d}".encode("utf-8"),
@@ -449,11 +449,18 @@ class TestV040SSTableAndFixes(unittest.TestCase):
         self.assertGreaterEqual(res_multi["data_blocks_verified"], 3)
         self.assertEqual(res_multi["recovered_records_count"], 12)
 
-        # Cumulative Snappy decompression budget circuit breaker
         tiny_budget = {"remaining": 20}
         res_budget = parse_leveldb_sstable(multi_sst, budget_state=tiny_budget)
-        self.assertEqual(tiny_budget["remaining"], 0)
+        self.assertEqual(tiny_budget["remaining"], 20)
         self.assertGreaterEqual(res_budget["corrupted_blocks_count"], 1)
+
+        # 3. Chromium prefixed string decoder edge cases
+        self.assertIsNone(_decode_chromium_string_prefixed(b""))
+        self.assertEqual(_decode_chromium_string_prefixed(b"\x01 Caf\xe9_Latin1 "), "Café_Latin1")
+        self.assertIsNone(_decode_chromium_string_prefixed(b"\x00\x00\xd8"))  # unpaired UTF-16LE surrogate
+        self.assertIsNone(_decode_chromium_string_prefixed(b"\xfe\xff\x80"))  # invalid UTF-8
+        self.assertIsNone(_decode_chromium_string_prefixed(b"x"))  # <2 chars after strip
+        self.assertIsNone(_decode_chromium_string_prefixed(b"\x01\x02\x03\x04\x05A"))  # low printable ratio
 
         # Short file, bad magic, bad footer varints, unknown compression type, invalid schema_mode
         with self.assertRaises(ValueError):
@@ -639,6 +646,561 @@ class TestV040SSTableAndFixes(unittest.TestCase):
             flood_out = io.BytesIO()
             self.assertEqual(run_mcp_stdio_server(instream=io.BytesIO(flood_hdr), outstream=flood_out), 0)
             self.assertIn("exceeds 16 KiB / 32-header", flood_out.getvalue().decode("utf-8"))
+
+    def test_07_algorithmic_bounds_substore_isolation_and_pdf_resync(self) -> None:
+        # 1. [B1/M4] Prefix-compressed quadratic key bomb (>128 MiB materialized & >64 KiB single key) rejected immediately
+        bomb_entries = bytearray()
+        cur_k_len = 0
+        for _k_i in range(20000):
+            bomb_entries.extend(encode_varint(cur_k_len))  # shared = full previous key
+            bomb_entries.extend(b"\x09\x00A\x01\x00\x00\x00\x00\x00\x00\x00")  # +9B valid InternalKey (value_type=1)
+            cur_k_len += 9
+        bomb_entries.extend(struct.pack("<II", 0, 1))
+        bomb_crc = mask_crc32c(crc32c(bytes(bomb_entries) + b"\x00"))
+        bomb_data_blk = bytes(bomb_entries) + struct.pack("<BI", 0, bomb_crc)
+
+        meta_raw = _encode_sstable_block([])
+        meta_blk = meta_raw + struct.pack("<BI", 0, mask_crc32c(crc32c(meta_raw + b"\x00")))
+        h0 = encode_varint(0) + encode_varint(len(bomb_entries))
+        idx_raw = _encode_sstable_block([(pack_internal_key(b"k", 1, 1), h0)])
+        idx_blk = idx_raw + struct.pack("<BI", 0, mask_crc32c(crc32c(idx_raw + b"\x00")))
+        m_off = len(bomb_data_blk)
+        i_off = m_off + len(meta_blk)
+        ftr = (
+            encode_varint(m_off)
+            + encode_varint(len(meta_raw))
+            + encode_varint(i_off)
+            + encode_varint(len(idx_raw))
+        ).ljust(40, b"\x00") + LEVELDB_SSTABLE_MAGIC_LE
+        prefix_bomb_sst = bomb_data_blk + meta_blk + idx_blk + ftr
+        res_pb = parse_leveldb_sstable(prefix_bomb_sst)
+        self.assertEqual(res_pb["corrupted_blocks_count"], 1)
+        self.assertIn("exceeds per-block amplification safety bound", res_pb["corrupted_blocks"][0]["reason"])
+
+        # Also verify cumulative materialized_remaining budget stops raw/Snappy multi-entry floods before OOM
+        mat_budget = {"remaining": 64 * 1024 * 1024, "materialized_remaining": 40000}
+        small_prefix = bytearray()
+        cur_s_len = 0
+        for _s_i in range(60):
+            small_prefix.extend(encode_varint(cur_s_len))
+            small_prefix.extend(b"\x20\x00" + (b"B" * 24) + b"\x01\x00\x00\x00\x00\x00\x00\x00")
+            cur_s_len += 32
+        small_prefix.extend(struct.pack("<II", 0, 1))
+        sp_blk = bytes(small_prefix) + struct.pack("<BI", 0, mask_crc32c(crc32c(bytes(small_prefix) + b"\x00")))
+        sm_off = len(sp_blk)
+        si_raw = _encode_sstable_block([(pack_internal_key(b"s", 1, 1), encode_varint(0) + encode_varint(len(small_prefix)))])
+        si_blk = si_raw + struct.pack("<BI", 0, mask_crc32c(crc32c(si_raw + b"\x00")))
+        si_off = sm_off + len(meta_blk)
+        sp_sst = (
+            sp_blk
+            + meta_blk
+            + si_blk
+            + (encode_varint(sm_off) + encode_varint(len(meta_raw)) + encode_varint(si_off) + encode_varint(len(si_raw))).ljust(40, b"\x00")
+            + LEVELDB_SSTABLE_MAGIC_LE
+        )
+        res_mat = parse_leveldb_sstable(sp_sst, budget_state=mat_budget)
+        self.assertLess(mat_budget["materialized_remaining"], 2000)
+        self.assertIn("exceeded 128 MiB store safety budget", res_mat["corrupted_blocks"][0]["reason"])
+
+        # Single >64 KiB InternalKey rejected immediately before allocation
+        giant_key_blk = encode_varint(0) + encode_varint(66000) + encode_varint(0) + (b"K" * 66000) + struct.pack("<II", 0, 1)
+        with self.assertRaises(ValueError) as gk_cm:
+            list(_iter_sstable_block_entries(giant_key_blk))
+        self.assertIn("exceeds 65536-byte safety cap", str(gk_cm.exception))
+
+        # 2. [B2/N4] Overlapping distinct Index BlockHandles (2,000 x 256 KiB) rejected in O(1) (< 0.2s)
+        pad_data = b"\x00" * (256 * 1024)
+        idx_kv = [
+            (
+                pack_internal_key(f"k_{idx:04d}".encode("ascii"), 9000 - idx, 1),
+                encode_varint(0) + encode_varint(len(pad_data) - 10 - idx),
+            )
+            for idx in range(2000)
+        ]
+        idx_amp_raw = _encode_sstable_block(idx_kv, restart_interval=16)
+        idx_amp_blk = idx_amp_raw + struct.pack("<BI", 0, mask_crc32c(crc32c(idx_amp_raw + b"\x00")))
+        m2_off = len(pad_data)
+        i2_off = m2_off + len(meta_blk)
+        ftr2 = (
+            encode_varint(m2_off)
+            + encode_varint(len(meta_raw))
+            + encode_varint(i2_off)
+            + encode_varint(len(idx_amp_raw))
+        ).ljust(40, b"\x00") + LEVELDB_SSTABLE_MAGIC_LE
+        amp_sst = pad_data + meta_blk + idx_amp_blk + ftr2
+        t0 = time.perf_counter()
+        res_amp = parse_leveldb_sstable(amp_sst)
+        elapsed_amp = time.perf_counter() - t0
+        self.assertLess(elapsed_amp, 0.5)
+        self.assertLessEqual(res_amp["corrupted_blocks_count"], 2)
+
+        # 3. [H1/M1] 107B >16MiB Snappy block does NOT poison store budget; mid-stream failed Snappy charges upfront
+        poison_pay = encode_varint(32 * 1024 * 1024)
+        poison_blk = poison_pay + struct.pack("<BI", 1, mask_crc32c(crc32c(poison_pay + b"\x01")))
+        pm_off = len(poison_blk)
+        pi_raw = _encode_sstable_block([(pack_internal_key(b"p", 1, 1), encode_varint(0) + encode_varint(len(poison_pay)))])
+        pi_blk = pi_raw + struct.pack("<BI", 0, mask_crc32c(crc32c(pi_raw + b"\x00")))
+        pi_off = pm_off + len(meta_blk)
+        poison_sst = (
+            poison_blk
+            + meta_blk
+            + pi_blk
+            + (
+                encode_varint(pm_off)
+                + encode_varint(len(meta_raw))
+                + encode_varint(pi_off)
+                + encode_varint(len(pi_raw))
+            ).ljust(40, b"\x00")
+            + LEVELDB_SSTABLE_MAGIC_LE
+        )
+
+        # Plausible-ratio Snappy block (declares 4096B from ~205B valid body, actually decodes 4095B) charges upfront
+        valid_4095 = compress_snappy(b"R" * 4095)
+        trunc_snappy_pay = encode_varint(4096) + valid_4095[len(encode_varint(4095)) :]
+        trunc_blk = trunc_snappy_pay + struct.pack("<BI", 1, mask_crc32c(crc32c(trunc_snappy_pay + b"\x01")))
+        tm_off = len(trunc_blk)
+        ti_raw = _encode_sstable_block([(pack_internal_key(b"t", 1, 1), encode_varint(0) + encode_varint(len(trunc_snappy_pay)))])
+        ti_blk = ti_raw + struct.pack("<BI", 0, mask_crc32c(crc32c(ti_raw + b"\x00")))
+        ti_off = tm_off + len(meta_blk)
+        trunc_sst = (
+            trunc_blk
+            + meta_blk
+            + ti_blk
+            + (
+                encode_varint(tm_off)
+                + encode_varint(len(meta_raw))
+                + encode_varint(ti_off)
+                + encode_varint(len(ti_raw))
+            ).ljust(40, b"\x00")
+            + LEVELDB_SSTABLE_MAGIC_LE
+        )
+        b_track = {"remaining": 10000}
+        parse_leveldb_sstable(trunc_sst, budget_state=b_track)
+        self.assertEqual(b_track["remaining"], 10000 - 4096)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            td = Path(tmpdir)
+            # H1 store test: 000001.ldb is poison, 000009.ldb is valid -> 000009.ldb still recovered!
+            h1_dir = td / "h1_store"
+            h1_dir.mkdir()
+            (h1_dir / "000001.ldb").write_bytes(poison_sst)
+            (h1_dir / "000009.ldb").write_bytes(
+                build_leveldb_sstable(
+                    [(b"k_good", 10, 1, b'{"id":"g1","from":"8:live:u","content":"intact after poison"}')],
+                    compress=True,
+                )
+            )
+            self.assertEqual(inspect_chromium_storage_path(h1_dir)["feasibility_verdict"], "PARTIAL")
+            self.assertEqual(parse_leveldb_store(h1_dir, redact=False)["recovered_records_count"], 1)
+
+            # 4. [H2 + M2] Tie between orphan & active picks active SSTable; NewFile+DeletedFile in same edit stays active
+            ve_same = build_version_edit(
+                comparator="idb_cmp1",
+                new_files=[(1, 5, 256, pack_internal_key(b"a", 1, 1), pack_internal_key(b"z", 9, 1))],
+                deleted_files=[(1, 5)],
+            )
+            man_same = encode_leveldb_log_record(REC_FULL, ve_same)
+            self.assertEqual(parse_leveldb_manifest(man_same)["active_file_levels"], {5: 1})
+
+            tie_dir = td / "tie_store"
+            tie_dir.mkdir()
+            (tie_dir / "MANIFEST-000001").write_bytes(man_same)
+            same_sst = build_leveldb_sstable(
+                [(b"k_tie", 8, 1, b'{"id":"t1","from":"8:live:u","content":"tie payload"}')],
+                compress=True,
+            )
+            (tie_dir / "000003.ldb").write_bytes(same_sst)  # orphan
+            (tie_dir / "000005.ldb").write_bytes(same_sst)  # active level 1
+            tie_res = parse_leveldb_store(tie_dir, redact=False)
+            self.assertEqual(tie_res["recovered_records_count"], 1)
+            rec_tie = tie_res["recovered_records"][0]
+            self.assertEqual(rec_tie["retention_state"], "LIVE_ACTIVE")
+            self.assertEqual(rec_tie["source_kind"], "sstable")
+            self.assertEqual(rec_tie["source_file"], "000005.ldb")
+            self.assertEqual(rec_tie["sstable_level"], 1)
+
+            # 5. [H3 + N5] Multi-substore parent directory isolates key spaces & blocks vault inside target dir
+            parent_idb = td / "chromium_idb_root"
+            origin_a = parent_idb / "https_bank.indexeddb.leveldb"
+            origin_b = parent_idb / "https_other.indexeddb.leveldb"
+            origin_a.mkdir(parents=True)
+            origin_b.mkdir(parents=True)
+            (origin_a / "000002.ldb").write_bytes(
+                build_leveldb_sstable(
+                    [(b"shared_key", 10, 1, b'{"id":"ba1","from":"8:live:u","content":"bank live"}')],
+                    compress=True,
+                )
+            )
+            (origin_b / "000002.ldb").write_bytes(
+                build_leveldb_sstable(
+                    [(b"shared_key", 99, 0, b"")],  # tombstone in DIFFERENT origin!
+                    compress=True,
+                )
+            )
+            merged_res = parse_leveldb_store(parent_idb, redact=False)
+            self.assertEqual(merged_res["leveldb_stores_reconciled"], 2)
+            self.assertEqual(merged_res["live_active_records_count"], 1)
+            self.assertEqual(merged_res["recovered_records"][0]["retention_state"], "LIVE_ACTIVE")
+
+            err_buf = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err_buf):
+                rc_v = cli_main(
+                    ["--vault-file", str(parent_idb / "inside_vault.json"), "parse-leveldb-store", str(parent_idb)]
+                )
+            self.assertNotEqual(rc_v, 0)
+
+        # 6. [H4 + H5] PDF missing `endobj` preserves revision count & flags error; unclosed `(` resyncs at `endobj`
+        pdf_no_endobj = (
+            b"%PDF-1.4\n"
+            b"1 0 obj\n<< /Producer (Rev1) >>\nendobj\n"
+            b"xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n"
+            b"trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n46\n%%EOF\n"
+            b"2 0 obj\n<< /Producer (Rev2) >>\n      \n"  # missing `endobj`!
+            b"xref\n2 1\n0000000149 00000 n \n"
+            b"trailer\n<< /Size 3 /Root 1 0 R /Prev 46 >>\nstartxref\n187\n%%EOF\n"
+        )
+        rep_h4 = inspect_pdf_container(pdf_no_endobj, "no_endobj.pdf")
+        self.assertFalse(rep_h4["valid_container"])
+        self.assertEqual(rep_h4["incremental_revision_count"], 2)
+        self.assertTrue(rep_h4["has_multiple_revisions"])
+
+        pdf_h5 = (
+            b"%PDF-1.4\n"
+            b"6 0 obj\n(\nendobj\n"
+            b"5 0 obj\n<< /OpenAction << /S /JavaScript /JS (app.alert(1)) >> >>\nendobj\n"
+            b"% )\n"
+            b"trailer\n<< /Root 5 0 R >>\nstartxref\n9\n%%EOF\n"
+        )
+        rep_h5 = inspect_pdf_container(pdf_h5, "unclosed_paren_obj.pdf")
+        self.assertFalse(rep_h5["valid_container"])
+        self.assertGreaterEqual(rep_h5["risk_markers"].get("js_actions", 0), 2)
+
+        # 7. [M3] Genuine Teams `chatsvc` message with Adaptive Card `amount`/`beneficiary` is preserved
+        teams_card = {
+            "id": "1742292600111",
+            "conversationid": "19:meeting_abc@thread.v2",
+            "messagetype": "RichText/Html",
+            "composetime": "2025-03-18T10:00:00Z",
+            "content": "Approval card attached",
+            "properties": {
+                "deletetime": 1742292999000,
+                "cards": [{"content": {"body": [{"data": {"amount": "5000", "beneficiary": "ACME"}}]}}],
+            },
+        }
+        self.assertEqual(classify_carved_json_object(teams_card, "auto"), "chatsvc")
+        self.assertEqual(classify_carved_json_object(teams_card, "chatsvc"), "chatsvc")
+
+    def test_08_r2_poison_isolation_op_overhead_orphan_tombstone_lost_and_pdf_linear(self) -> None:
+        from starshield.cli import build_synthetic_leveldb_sstable_bytes
+        from starshield.pdf_containers import build_synthetic_incremental_pdf
+
+        meta_raw = _encode_sstable_block([])
+        meta_blk = meta_raw + struct.pack("<BI", 0, mask_crc32c(crc32c(meta_raw + b"\x00")))
+
+        # 1. [R2-H1a & R2-H1b] 182B Snappy-reservation poison & 3.7KB 64KiB-shared-key poison MUST NOT suppress 000009.ldb
+        s_blocks = []
+        for _ in range(4):
+            pay = encode_varint(16 * 1024 * 1024) + b"\x00A"
+            s_blocks.append(pay + struct.pack("<BI", 1, mask_crc32c(crc32c(pay + b"\x01"))))
+        cur_off = 0
+        idx_kv = []
+        raw_concat = bytearray()
+        for idx_b, blk in enumerate(s_blocks):
+            idx_kv.append(
+                (
+                    pack_internal_key(f"p{idx_b}".encode("ascii"), 10 - idx_b, 1),
+                    encode_varint(cur_off) + encode_varint(len(blk) - 5),
+                )
+            )
+            raw_concat.extend(blk)
+            cur_off += len(blk)
+        m_off = len(raw_concat)
+        i_raw = _encode_sstable_block(idx_kv)
+        i_blk = i_raw + struct.pack("<BI", 0, mask_crc32c(crc32c(i_raw + b"\x00")))
+        i_off = m_off + len(meta_blk)
+        snappy_res_poison = (
+            bytes(raw_concat)
+            + meta_blk
+            + i_blk
+            + (encode_varint(m_off) + encode_varint(len(meta_raw)) + encode_varint(i_off) + encode_varint(len(i_raw))).ljust(40, b"\x00")
+            + LEVELDB_SSTABLE_MAGIC_LE
+        )
+
+        ent_shared = bytearray(
+            encode_varint(0) + encode_varint(65536) + encode_varint(0) + b"A" * (65536 - 8) + struct.pack("<Q", (1 << 8) | 1)
+        )
+        for _ in range(2100):
+            ent_shared.extend(encode_varint(65536) + b"\x00\x00")
+        ent_shared.extend(struct.pack("<II", 0, 1))
+        comp_shared = compress_snappy(bytes(ent_shared))
+        blk_shared = comp_shared + struct.pack("<BI", 1, mask_crc32c(crc32c(comp_shared + b"\x01")))
+        ms_off = len(blk_shared)
+        is_raw = _encode_sstable_block([(pack_internal_key(b"z", 1, 1), encode_varint(0) + encode_varint(len(comp_shared)))])
+        is_blk = is_raw + struct.pack("<BI", 0, mask_crc32c(crc32c(is_raw + b"\x00")))
+        is_off = ms_off + len(meta_blk)
+        mat_poison = (
+            blk_shared
+            + meta_blk
+            + is_blk
+            + (encode_varint(ms_off) + encode_varint(len(meta_raw)) + encode_varint(is_off) + encode_varint(len(is_raw))).ljust(40, b"\x00")
+            + LEVELDB_SSTABLE_MAGIC_LE
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            td = Path(tmpdir)
+            for tag_p, poison_bytes in (("snap_res", snappy_res_poison), ("mat_64k", mat_poison)):
+                pd = td / tag_p
+                pd.mkdir()
+                (pd / "000001.ldb").write_bytes(poison_bytes)
+                (pd / "000009.ldb").write_bytes(build_synthetic_leveldb_sstable_bytes())
+                st_p = parse_leveldb_store(pd, redact=True)
+                pr_p = inspect_chromium_storage_path(pd, redact=True)
+                self.assertEqual(st_p["recovered_records_count"], 2, tag_p)
+                self.assertEqual(pr_p["feasibility_verdict"], "PARTIAL", tag_p)
+                self.assertGreaterEqual(pr_p["carvable_json_records_count"], 2, tag_p)
+
+            # 2. [R2-H3] Empty-key WAL deletion flood capped by 250k op budget in < 1.0s
+            wal_flood_dir = td / "wal_zero_ops"
+            wal_flood_dir.mkdir()
+            n_ops = 400000
+            flood_batch = struct.pack("<QI", 1, n_ops) + (b"\x00\x00" * n_ops)
+            from starshield.leveldb_log import encode_logical_record_across_blocks
+
+            (wal_flood_dir / "000003.log").write_bytes(encode_logical_record_across_blocks(flood_batch))
+            t_w0 = time.perf_counter()
+            res_wf = parse_leveldb_store(wal_flood_dir, redact=True)
+            self.assertLess(time.perf_counter() - t_w0, 2.0)
+            self.assertGreaterEqual(res_wf["corrupted_blocks_or_frames_count"], 1)
+
+            # 3. [R2-M1 & R2-M2] Unreferenced orphan tombstone does NOT override active live record; `lost/` folded as orphan
+            ot_dir = td / "orphan_tomb_and_lost"
+            ot_dir.mkdir()
+            live_rec = b'{"id":"m1","from":"8:live:alice","composetime":"2025-01-01T00:00:00Z","content":"hello"}'
+            live_sst = build_leveldb_sstable([(b"k1", 10, 1, live_rec)])
+            (ot_dir / "000005.ldb").write_bytes(live_sst)
+            ik1 = pack_internal_key(b"k1", 10, 1)
+            ve_ot = build_version_edit(
+                comparator="leveldb.BytewiseComparator",
+                log_number=6,
+                next_file_number=8,
+                last_sequence=10,
+                new_files=[(1, 5, len(live_sst), ik1, ik1)],
+            )
+            (ot_dir / "MANIFEST-000002").write_bytes(encode_leveldb_log_record(REC_FULL, ve_ot))
+            (ot_dir / "CURRENT").write_text("MANIFEST-000002\n", encoding="utf-8")
+            (ot_dir / "000007.ldb").write_bytes(build_leveldb_sstable([(b"k1", 99, 0, b"")]))  # orphan tombstone!
+            (ot_dir / "lost").mkdir()
+            (ot_dir / "lost" / "000003.ldb").write_bytes(
+                build_leveldb_sstable([(b"k2", 3, 1, live_rec.replace(b"m1", b"m2"))])
+            )
+            res_ot = parse_leveldb_store(ot_dir, redact=False)
+            self.assertEqual(res_ot["leveldb_stores_reconciled"], 1)
+            by_mid = {r["message_id"]: r for r in res_ot["recovered_records"]}
+            self.assertEqual(by_mid["m1"]["retention_state"], "LIVE_ACTIVE")
+            self.assertFalse(by_mid["m1"]["superseded_by_tombstone"])
+            self.assertIsNone(by_mid["m1"]["superseded_by_sequence"])
+            self.assertEqual(by_mid["m2"]["retention_state"], "TOMBSTONED_HISTORICAL_RECOVERED")
+            self.assertEqual(by_mid["m2"]["source_kind"], "orphan_sstable")
+            self.assertTrue(by_mid["m2"]["evicted_from_manifest"])
+
+        # 4. [R2-B1 & R2-H2] 20,000 in-object `%%EOF` lines finish in < 0.5s; stray `[` / `<<` before xref caught & revs=2
+        t_pdf0 = time.perf_counter()
+        many_eof_pdf = b"%PDF-1.7\n1 0 obj\n" + (b"%%EOF\n" * 20000) + b"endobj\n%%EOF\n"
+        rep_many = inspect_pdf_container(many_eof_pdf, "many_eof.pdf")
+        self.assertLess(time.perf_counter() - t_pdf0, 1.0)
+        self.assertEqual(rep_many["incremental_revision_count"], 1)
+
+        base_inc = build_synthetic_incremental_pdf()
+        i_final = base_inc.rfind(b"endobj") + 6
+        j_rev1 = base_inc.find(b"endobj", base_inc.find(b"4 0 obj")) + 6
+        for mut_pdf in (
+            base_inc[:i_final] + b"<<" + base_inc[i_final + 1 :],
+            base_inc[:i_final] + b"[" + base_inc[i_final + 1 :],
+            base_inc[:j_rev1] + b"[" + base_inc[j_rev1 + 1 :],
+        ):
+            r_mut = inspect_pdf_container(mut_pdf, "mut.pdf")
+            self.assertEqual(r_mut["incremental_revision_count"], 2)
+            self.assertTrue(r_mut["has_multiple_revisions"])
+            self.assertFalse(r_mut["valid_container"])
+
+    def test_09_symlink_hardlink_vault_guards_store_priority_wal_zero_hole_and_pdf_minified_dicts(self) -> None:
+        import os
+
+        from starshield.cli import _guard_vault_not_same_file
+        from starshield.ioc_validators import extract_validated_iocs
+        from starshield.leveldb_log import (
+            BLOCK_SIZE,
+            REC_FIRST,
+            REC_LAST,
+            build_writebatch,
+            encode_leveldb_log_record,
+            encode_logical_record_across_blocks,
+            parse_leveldb_wal,
+        )
+        from starshield.mcp_server import _read_next_rpc_frame, MAX_RPC_FRAME_BYTES
+        from starshield.pseudonymizer import extract_currency_amounts
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            td = Path(tmpdir)
+
+            # 1. Symlink-input, symlink-ancestor, symlink-dir, and multi-hardlink `--vault-file` guards
+            ev_dir = td / "evidence_store"
+            ev_sub = ev_dir / "sub"
+            ev_sub.mkdir(parents=True)
+            ev_ldb = ev_dir / "000001.ldb"
+            ev_ldb.write_bytes(
+                build_leveldb_sstable([(b"k", 1, 1, b'{"id":"1","from":"8:live:a","content":"hi"}')])
+            )
+
+            sym_in_file = td / "sym_in.ldb"
+            sym_in_file.symlink_to(ev_ldb)
+            with self.assertRaises(SafeDiagnosticError):
+                _guard_vault_not_same_file(ev_ldb, sym_in_file)
+
+            sym_anc = td / "sym_anc"
+            sym_anc.symlink_to(ev_sub)
+            with self.assertRaises(SafeDiagnosticError):
+                _guard_vault_not_same_file(sym_anc / "tokens.json", ev_dir)
+
+            sym_dir_in = td / "sym_dir_in"
+            sym_dir_in.symlink_to(ev_dir)
+            with self.assertRaises(SafeDiagnosticError):
+                _guard_vault_not_same_file(ev_dir / "tokens.json", sym_dir_in)
+
+            hl_vault = td / "hardlink_vault.json"
+            os.link(ev_ldb, hl_vault)
+            with self.assertRaises(SafeDiagnosticError):
+                _guard_vault_not_same_file(hl_vault, ev_dir)
+
+            # 2. Stale WAL budget exhaustion must NOT starve active WAL tombstones or active SSTables
+            prio_dir = td / "prio_store"
+            prio_dir.mkdir()
+            msg_del = b'{"id":"m_del","from":"8:live:u","composetime":"2025-01-01T00:00:00Z","content":"deleted"}'
+            msg_keep = b'{"id":"m_keep","from":"8:live:u","composetime":"2025-01-01T00:00:00Z","content":"kept"}'
+            sst_50 = build_leveldb_sstable([(b"k_del", 50, 1, msg_del), (b"k_keep", 51, 1, msg_keep)])
+            (prio_dir / "000050.ldb").write_bytes(sst_50)
+            # Stale log 000001.log (< log_number=100) tries to exhaust 250k op budget
+            stale_flood = struct.pack("<QI", 1, 300000) + (b"\x00\x00" * 300000)
+            (prio_dir / "000001.log").write_bytes(encode_logical_record_across_blocks(stale_flood))
+            # Live log 000100.log deletes k_del at seq 200
+            live_wb = build_writebatch(200, [(0, b"k_del", b"")])
+            (prio_dir / "000100.log").write_bytes(encode_leveldb_log_record(REC_FULL, live_wb))
+            ik_sm = pack_internal_key(b"k_del", 50, 1)
+            ik_lg = pack_internal_key(b"k_keep", 51, 1)
+            ve_prio = build_version_edit(
+                comparator="leveldb.BytewiseComparator",
+                log_number=100,
+                next_file_number=101,
+                last_sequence=200,
+                new_files=[(1, 50, len(sst_50), ik_sm, ik_lg)],
+            )
+            (prio_dir / "MANIFEST-000002").write_bytes(encode_leveldb_log_record(REC_FULL, ve_prio))
+            (prio_dir / "CURRENT").write_text("MANIFEST-000002\n", encoding="utf-8")
+
+            res_prio = parse_leveldb_store(prio_dir, redact=False)
+            prio_by_id = {r["message_id"]: r for r in res_prio["recovered_records"]}
+            self.assertEqual(prio_by_id["m_keep"]["retention_state"], "LIVE_ACTIVE")
+            self.assertEqual(prio_by_id["m_del"]["retention_state"], "TOMBSTONED_HISTORICAL_RECOVERED")
+            self.assertTrue(prio_by_id["m_del"]["superseded_by_tombstone"])
+            self.assertEqual(prio_by_id["m_del"]["superseded_by_sequence"], 200)
+
+            # 3. Missing/broken CURRENT->MANIFEST fails closed (never promotes obsolete SSTables to LIVE_ACTIVE)
+            broken_man_dir = td / "broken_manifest_store"
+            broken_man_dir.mkdir()
+            (broken_man_dir / "000005.ldb").write_bytes(sst_50)
+            (broken_man_dir / "CURRENT").write_text("MANIFEST-000099\n", encoding="utf-8")
+            res_bm = parse_leveldb_store(broken_man_dir, redact=True)
+            self.assertTrue(res_bm["manifest_present"])
+            self.assertGreaterEqual(res_bm["corrupted_blocks_or_frames_count"], 1)
+            self.assertEqual(res_bm["live_active_records_count"], 0)
+            for rec_bm in res_bm["recovered_records"]:
+                self.assertEqual(rec_bm["retention_state"], "TOMBSTONED_HISTORICAL_RECOVERED")
+
+            # 4. Standalone single-file SSTable reconciles in-file `0x00` tombstone
+            in_sst_del = build_leveldb_sstable(
+                [
+                    (b"k_same", 10, 0, b""),
+                    (b"k_same", 5, 1, msg_del),
+                ]
+            )
+            res_single = parse_leveldb_sstable(in_sst_del)
+            self.assertEqual(res_single["recovered_records_count"], 1)
+            self.assertEqual(res_single["recovered_records"][0]["retention_state"], "TOMBSTONED_HISTORICAL_RECOVERED")
+            self.assertTrue(res_single["recovered_records"][0]["superseded_by_tombstone"])
+            self.assertEqual(res_single["recovered_records"][0]["superseded_by_sequence"], 10)
+
+            # 5. WAL `REC_ZERO` hole breaks unclosed `REC_FIRST` before next block `REC_LAST`
+            full_wb = build_writebatch(900, [(1, b"k_hole", msg_keep)])
+            first_half = encode_leveldb_log_record(REC_FIRST, full_wb[:20])
+            block0 = first_half + b"\x00" * (BLOCK_SIZE - len(first_half))
+            block1 = encode_leveldb_log_record(REC_LAST, full_wb[20:])
+            res_hole = parse_leveldb_wal(block0 + block1)
+            self.assertEqual(res_hole["recovered_records_count"], 0)
+            self.assertGreaterEqual(res_hole["corrupted_frames_count"], 2)
+
+            # WAL tombstone counter & `superseded_by_wal_tombstone`
+            wal_tomb_raw = encode_leveldb_log_record(
+                REC_FULL, build_writebatch(300, [(1, b"k_wt", msg_del), (0, b"k_wt", b"")])
+            )
+            res_wt = parse_leveldb_wal(wal_tomb_raw)
+            self.assertEqual(res_wt["writebatch_tombstone_ops_seen"], 1)
+            self.assertTrue(res_wt["recovered_records"][0]["superseded_by_wal_tombstone"])
+
+            # 6. Bounded MCP oversize non-newline drain
+            huge_stream = io.BytesIO(b"A" * (MAX_RPC_FRAME_BYTES * 3))
+            _raw_f, _mode_f, f_err = _read_next_rpc_frame(huge_stream)
+            self.assertIsNotNone(f_err)
+            self.assertLessEqual(huge_stream.tell(), MAX_RPC_FRAME_BYTES * 2 + 65536)
+
+        # 7. PDF minified `<<</JS...>>`, bounded `startxref` spaces, in-object `xref`/`stream..endobj`, and `<...>` non-hex resync
+        min_pdf = b"%PDF-1.7\n1 0 obj\n<<</JS(app.alert(1))/Launch</F(cmd.exe)>>>>\nendobj\ntrailer\n<<>>\nstartxref\n9\n%%EOF\n"
+        rep_min = inspect_pdf_container(min_pdf, "min.pdf")
+        self.assertGreaterEqual(rep_min["risk_markers"]["js_actions"], 1)
+        self.assertGreaterEqual(rep_min["risk_markers"]["launch_actions"], 1)
+
+        inobj_xref_pdf = (
+            b"%PDF-1.7\n1 0 obj\n<<>>\nxref\n0 1\n0000000000 65535 f \ntrailer\n<<>>\nstartxref\n0\n%%EOF\nendobj\n"
+            b"xref\n0 1\n0000000000 65535 f \ntrailer\n<</Size 1>>\nstartxref\n95\n%%EOF\n"
+        )
+        rep_iox = inspect_pdf_container(inobj_xref_pdf, "iox.pdf")
+        self.assertEqual(rep_iox["incremental_revision_count"], 1)
+
+        pre_stream_eof_pdf = (
+            b"%PDF-1.7\n1 0 obj\n<</Length 4>>\n%%EOF\nstream\nabcd\nendstream\nendobj\n"
+            b"xref\n0 1\n0000000000 65535 f \ntrailer\n<</Size 1>>\nstartxref\n66\n%%EOF\n"
+        )
+        rep_pse = inspect_pdf_container(pre_stream_eof_pdf, "pse.pdf")
+        self.assertEqual(rep_pse["incremental_revision_count"], 1)
+
+        t_sx = time.perf_counter()
+        sx_spaces_pdf = b"%PDF-1.7\n1 0 obj\n<<startxref" + (b" " * 150000) + b">>\nendobj\n%%EOF\n"
+        inspect_pdf_container(sx_spaces_pdf, "sx.pdf")
+        self.assertLess(time.perf_counter() - t_sx, 0.5)
+
+        bad_hex_pdf = b"%PDF-1.7\n1 0 obj<<>>endobj\n<\ntrailer\n<<>>\nstartxref\n0\n%%EOF\n>\n"
+        rep_bh = inspect_pdf_container(bad_hex_pdf, "bh.pdf")
+        self.assertFalse(rep_bh["valid_container"])
+        self.assertGreaterEqual(rep_bh["incremental_revision_count"], 1)
+
+        # Multi-line valid string containing bare `stream` word inside `1 0 obj` must NOT false-trigger unclosed error
+        ml_str_pdf = (
+            b"%PDF-1.7\n1 0 obj\n(hello\nstream\nworld)\nendobj\n"
+            b"xref\n0 1\n0000000000 65535 f \ntrailer\n<</Size 1>>\nstartxref\n43\n%%EOF\n"
+        )
+        rep_mls = inspect_pdf_container(ml_str_pdf, "mls.pdf")
+        self.assertTrue(rep_mls["valid_container"])
+        self.assertEqual(rep_mls["container_errors"], [])
+
+        # 8. Thin-space/figure-space currency amounts & NBSP IBAN / ISO 11649 RF
+        amts = extract_currency_amounts("Paid USD 1\u2009234.5 and EUR 1\u2007234.5678")
+        self.assertIn("USD 1 234.5", amts)
+        self.assertIn("EUR 1 234.5678", amts)
+        iocs_nbsp = extract_validated_iocs(
+            "Wire GB82\u00a0WEST\u00a01234\u00a05698\u00a07654\u00a032 ref RF18\u00a05390\u00a00754\u00a07034",
+            redact=False,
+        )
+        self.assertIn("GB82WEST12345698765432", iocs_nbsp["mod97_validated_ibans"])
+        self.assertIn("RF18539007547034", iocs_nbsp["iso11649_creditor_references"])
 
 
 if __name__ == "__main__":

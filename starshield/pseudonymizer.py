@@ -59,7 +59,7 @@ _CURRENCY_AMOUNT_NUM_PAT = (
     r"(?:"
     r"[0-9]{1,3}(?:\.[0-9]{3})+(?:,[0-9]{2})?"
     r"|[0-9]{1,3}(?:['\u2019][0-9]{3})+(?:\.[0-9]{1,4}|,[0-9]{2})?"
-    r"|[0-9]{1,3}(?:[ \u00a0\u202f\u2009\u2007][0-9]{3})+(?:,[0-9]{2}|\.[0-9]{2})"
+    r"|[0-9]{1,3}(?:[ \u00a0\u202f\u2009\u2007][0-9]{3})+(?:,[0-9]{2}|\.[0-9]{1,4})"
     r"|[0-9]{1,3}(?:[\u00a0\u202f\u2009\u2007][0-9]{3})+(?![\u00a0\u202f\u2009\u2007][0-9]|[.,][0-9])"
     r"|[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,4})?"
     r"|[0-9]+(?:\.[0-9]{1,4}|,[0-9]{2})"
@@ -229,6 +229,8 @@ class SessionPseudonymizer:
         if existing_st is not None:
             if stat.S_ISLNK(existing_st.st_mode) or not stat.S_ISREG(existing_st.st_mode):
                 raise OSError("Refusing to write token vault through a symbolic link or non-regular file")
+            if existing_st.st_nlink > 1:
+                raise SafeDiagnosticError("Refusing to overwrite multi-hardlink target with token vault")
             try:
                 load_vault_strict(target)
             except (
@@ -426,6 +428,8 @@ def shred_vault_file(vault_path: Path) -> Dict[str, Any]:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise OSError("Refusing to shred non-regular file")
+        if st.st_nlink > 1:
+            raise OSError("Refusing to shred multi-hardlink file")
         orig_dev, orig_ino = st.st_dev, st.st_ino
         if st.st_size > MAX_VAULT_BYTES:
             raise ValueError(f"File exceeds {MAX_VAULT_BYTES} byte vault cap; refusing to shred")
