@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-title: "StarShield Forensics & StarShield-Bench-24: Offline Chromium LevelDB .log Carving, Container Structure Inspection, and Synthetic Evaluation Suite"
+title: "StarShield Forensics & StarShield-Bench-24: Offline Chromium LevelDB .log/.ldb/MANIFEST Carving, Container Structure Inspection, and Synthetic Evaluation Suite"
 message: "If you use StarShield Forensics or StarShield-Bench-24 in offline digital forensics research or endpoint triage workflows, please cite this software and benchmark."
 type: software
 authors:
@@ -7,9 +7,9 @@ authors:
     given-names: "Ziqi"
 repository-code: "https://github.com/Ziqi/starshield-forensics"
 url: "https://ziqi.github.io/starshield/"
-version: "0.3.11"
+version: "0.4.0"
 doi: "10.5281/zenodo.24145804"
-date-released: "2026-11-22"
+date-released: "2026-11-25"
 license: "MIT"
 keywords:
   - "digital-forensics"

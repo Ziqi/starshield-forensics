@@ -246,7 +246,9 @@ _PORTAL_ID_KEYS = (
     "msg_id",
     "client_msg_id",
     "invoice_id",
+    "invoiceid",
     "payment_id",
+    "paymentid",
     "tx_id",
     "transaction_id",
     "reference",
@@ -265,13 +267,20 @@ _PORTAL_CONTENT_KEYS = (
     "note",
     "description",
     "payment_instructions",
+    "paymentinstructions",
     "iban",
     "beneficiary_iban",
+    "beneficiaryiban",
     "account_number",
+    "accountnumber",
     "sort_code",
+    "sortcode",
     "beneficiary",
     "payee",
     "amount",
+    "total_due",
+    "totaldue",
+    "price",
 )
 
 
@@ -409,12 +418,18 @@ _CHATSVC_SIGNATURE_KEYS = frozenset(
 _B2B_INVOICE_EXCLUSIVE_KEYS = frozenset(
     {
         "invoice_id",
+        "invoiceid",
         "payment_id",
+        "paymentid",
         "beneficiary_iban",
+        "beneficiaryiban",
         "iban",
         "sort_code",
+        "sortcode",
         "account_number",
+        "accountnumber",
         "routing_number",
+        "routingnumber",
         "swift",
         "bic",
         "beneficiary",
@@ -422,12 +437,37 @@ _B2B_INVOICE_EXCLUSIVE_KEYS = frozenset(
         "vendor",
         "supplier",
         "payment_instructions",
+        "paymentinstructions",
         "amount",
         "total_due",
+        "totaldue",
+        "price",
         "payment_ref",
+        "paymentref",
     }
 )
+_SLACK_EXCLUSIVE_KEYS = frozenset({"channel", "blocks", "subtype", "deleted_ts", "client_msg_id"})
 _SKYPE_TEAMS_MRI_PREFIXES = ("8:", "live:", "28:", "4:")
+
+
+def _has_nested_financial_keys(node: Any) -> bool:
+    """Iteratively inspect nested dicts/lists (e.g. `properties`) for financial/invoice keys."""
+    work: List[Any] = [node]
+    visited = 0
+    while work and visited < 512:
+        cur = work.pop()
+        visited += 1
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if str(k).lower() in _B2B_INVOICE_EXCLUSIVE_KEYS:
+                    return True
+                if isinstance(v, (dict, list)):
+                    work.append(v)
+        elif isinstance(cur, list):
+            for item in cur:
+                if isinstance(item, (dict, list)):
+                    work.append(item)
+    return False
 
 
 def _is_valid_chatsvc_message_obj(obj: Any, *, allow_generic_id_content: bool = False) -> bool:
@@ -443,12 +483,14 @@ def _is_valid_chatsvc_message_obj(obj: Any, *, allow_generic_id_content: bool = 
     if msg_id is None or str(msg_id).strip() == "":
         return False
     lower_keys = set(lower_map.keys())
-    # Financial / invoice routing keys unconditionally veto chatsvc before properties/from checks
-    if lower_keys & _B2B_INVOICE_EXCLUSIVE_KEYS:
+    props = obj.get("properties", lower_map.get("properties"))
+    # Financial / invoice routing keys (top-level or nested inside properties) unconditionally veto chatsvc
+    if (lower_keys & _B2B_INVOICE_EXCLUSIVE_KEYS) or (props is not None and _has_nested_financial_keys(props)):
         return False
     if lower_keys & _CHATSVC_SIGNATURE_KEYS:
         return True
-    props = obj.get("properties", lower_map.get("properties"))
+    if lower_keys & _SLACK_EXCLUSIVE_KEYS:
+        return False
     if isinstance(props, dict) and any(
         str(pk).lower() in ("deletetime", "edittime", "emotions", "links") for pk in props.keys()
     ):
@@ -489,7 +531,11 @@ def classify_carved_json_object(obj: Any, schema_mode: str = "auto") -> str | No
         return "slack_web"
 
     # Explicit B2B supplier, ERP, or banking invoice/payment portal shape when financial keys are present
-    if (lower_keys & set(_PORTAL_ID_KEYS)) and (lower_keys & _B2B_INVOICE_EXCLUSIVE_KEYS):
+    props_sub = obj.get("properties")
+    has_fin = bool(lower_keys & _B2B_INVOICE_EXCLUSIVE_KEYS) or (
+        props_sub is not None and _has_nested_financial_keys(props_sub)
+    )
+    if (lower_keys & set(_PORTAL_ID_KEYS)) and has_fin:
         return "b2b_portal_json"
 
     # WhatsApp Web / Signal / Generic Web Messenger shape
@@ -643,16 +689,25 @@ def normalize_carved_record_fields(obj: Dict[str, Any], schema_tag: str) -> Dict
             "payee",
             "iban",
             "beneficiary_iban",
+            "beneficiaryiban",
             "sort_code",
+            "sortcode",
             "account_number",
+            "accountnumber",
             "routing_number",
+            "routingnumber",
             "swift",
             "bic",
             "amount",
             "total_due",
+            "totaldue",
+            "price",
             "payment_ref",
+            "paymentref",
         ):
             v = _get_ci(obj, lower_map, k)
+            if v is None:
+                v = _get_ci(props, props_low, k)
             if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
                 continue
             if v is not None and str(v).strip():
@@ -828,17 +883,19 @@ def _extract_json_objects_from_bytes(
     return found
 
 
-def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, Any]:
-    """Parse a Chromium LevelDB `.log` file, verifying CRC32C, WriteBatch bounds, and EOF completeness."""
-    if schema_mode not in VALID_SCHEMA_MODES:
-        raise ValueError(f"Unsupported schema_mode={schema_mode!r}; expected one of {VALID_SCHEMA_MODES}")
+def iter_leveldb_logical_records(
+    raw_bytes: bytes,
+) -> Tuple[List[Tuple[int, bytes]], int, List[Dict[str, Any]], int]:
+    """
+    Parse 32 KiB LevelDB log-framed records (shared by `.log` WAL and `MANIFEST-*`).
 
+    Returns `(logical_records, valid_physical_frames, corrupted_frames, corrupted_total_count)`.
+    """
     total_len = len(raw_bytes)
+    logical_out: List[Tuple[int, bytes]] = []
     physical_records_ok = 0
     corrupted_records: List[Dict[str, Any]] = []
     corrupted_total_count = 0
-    recovered_entries: List[Dict[str, Any]] = []
-    stats: Dict[str, int] = {"value_ops_total": 0, "blink_v8_binary_only_values": 0}
 
     def add_corrupted(entry: Dict[str, Any]) -> None:
         nonlocal corrupted_total_count
@@ -912,8 +969,7 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
                     )
                     frag_buf.clear()
                     frag_start_offset = None
-                logical_bytes = chunk
-                logical_offset = rec_offset
+                logical_out.append((rec_offset, chunk))
             elif rec_type == REC_FIRST:
                 if frag_start_offset is not None:
                     add_corrupted(
@@ -924,7 +980,6 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
                     )
                 frag_buf = bytearray(chunk)
                 frag_start_offset = rec_offset
-                continue
             elif rec_type == REC_MIDDLE:
                 if frag_start_offset is None:
                     add_corrupted({"byte_offset": rec_offset, "reason": "Orphan MIDDLE fragment without FIRST"})
@@ -937,7 +992,6 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
                     frag_start_offset = None
                     continue
                 frag_buf.extend(chunk)
-                continue
             elif rec_type == REC_LAST:
                 if frag_start_offset is None:
                     add_corrupted({"byte_offset": rec_offset, "reason": "Orphan LAST fragment without FIRST"})
@@ -950,27 +1004,13 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
                     frag_start_offset = None
                     continue
                 frag_buf.extend(chunk)
-                logical_bytes = bytes(frag_buf)
-                logical_offset = frag_start_offset
+                logical_out.append((frag_start_offset, bytes(frag_buf)))
                 frag_buf.clear()
                 frag_start_offset = None
             else:
                 add_corrupted({"byte_offset": rec_offset, "reason": f"Unknown LevelDB record type {rec_type}"})
                 frag_buf.clear()
                 frag_start_offset = None
-                continue
-
-            batch_corrupt: List[Dict[str, Any]] = []
-            _decode_writebatch_into(
-                logical_bytes,
-                logical_offset,
-                recovered_entries,
-                batch_corrupt,
-                schema_mode=schema_mode,
-                stats=stats,
-            )
-            for c_item in batch_corrupt:
-                add_corrupted(c_item)
 
         if pos < block_end:
             trailer = raw_bytes[pos:block_end]
@@ -992,11 +1032,40 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
             }
         )
 
+    return logical_out, physical_records_ok, corrupted_records, corrupted_total_count
+
+
+def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, Any]:
+    """Parse a Chromium LevelDB `.log` file, verifying CRC32C, WriteBatch bounds, and EOF completeness."""
+    if schema_mode not in VALID_SCHEMA_MODES:
+        raise ValueError(f"Unsupported schema_mode={schema_mode!r}; expected one of {VALID_SCHEMA_MODES}")
+
+    logical_records, physical_records_ok, corrupted_records, corrupted_total_count = iter_leveldb_logical_records(
+        raw_bytes
+    )
+    recovered_entries: List[Dict[str, Any]] = []
+    stats: Dict[str, int] = {"value_ops_total": 0, "blink_v8_binary_only_values": 0}
+
+    for logical_offset, logical_bytes in logical_records:
+        batch_corrupt: List[Dict[str, Any]] = []
+        _decode_writebatch_into(
+            logical_bytes,
+            logical_offset,
+            recovered_entries,
+            batch_corrupt,
+            schema_mode=schema_mode,
+            stats=stats,
+        )
+        for c_item in batch_corrupt:
+            corrupted_total_count += 1
+            if len(corrupted_records) < MAX_CORRUPTED_RECORDS_REPORTED:
+                corrupted_records.append(c_item)
+
     chatsvc_count = sum(1 for r in recovered_entries if r.get("schema_detected") == "chatsvc")
     return {
         "parser": f"leveldb_wal_32k_crc32c_v{__version__}",
         "schema_mode": schema_mode,
-        "file_size_bytes": total_len,
+        "file_size_bytes": len(raw_bytes),
         "valid_physical_frames": physical_records_ok,
         "writebatch_value_ops_seen": stats["value_ops_total"],
         "blink_v8_non_json_values_skipped": stats["blink_v8_binary_only_values"],
@@ -1177,18 +1246,17 @@ def inspect_chromium_storage_path(
         )
 
     if stat.S_ISREG(target_st.st_mode):
-        suf = target.suffix.lower()
-        name_low = target.name.lower()
+        clean_target_name = target.name.rstrip(" .")
+        suf = Path(clean_target_name).suffix.lower()
+        name_low = clean_target_name.lower()
         if suf == ".log":
             log_files.append(target)
         elif suf in (".ldb", ".sst"):
             ldb_files.append(target)
-        elif _is_sqlite_artifact(name_low, suf) or (
-            suf in (".db", ".db3", ".vscdb", ".sdb") and _has_sqlite3_magic(target)
-        ):
+        elif _is_sqlite_artifact(name_low, suf) or _has_sqlite3_magic(target):
             sqlite_files_count += 1
     elif stat.S_ISDIR(target_st.st_mode):
-        target_is_blob_dir = target.name.lower().endswith(".blob")
+        target_is_blob_dir = target.name.rstrip(" .").lower().endswith(".blob")
         for dirpath, dirnames, filenames in os.walk(target, followlinks=False):
             dirnames.sort()
             filenames.sort()
@@ -1196,15 +1264,18 @@ def inspect_chromium_storage_path(
                 rel_parts = Path(dirpath).relative_to(target).parts
             except ValueError:
                 rel_parts = ()
-            in_blob_subdir = target_is_blob_dir or any(pt.lower().endswith(".blob") for pt in rel_parts)
+            in_blob_subdir = target_is_blob_dir or any(
+                pt.rstrip(" .").lower().endswith(".blob") for pt in rel_parts
+            )
 
             for dname in list(dirnames):
                 if scanned_files >= MAX_PRECHECK_SCAN_FILES:
                     scan_truncated = True
                     break
                 scanned_files += 1
-                dlow = dname.lower()
-                dsuf = Path(dname).suffix.lower()
+                clean_dname = dname.rstrip(" .")
+                dlow = clean_dname.lower()
+                dsuf = Path(clean_dname).suffix.lower()
                 if dsuf in (".ldb", ".sst"):
                     non_regular_sstable_entries += 1
                 elif dsuf == ".blob" or dlow.endswith(".blob"):
@@ -1224,8 +1295,9 @@ def inspect_chromium_storage_path(
                 except OSError:
                     continue
                 scanned_files += 1
-                suf = p.suffix.lower()
-                name_low = fname.lower()
+                clean_fname = fname.rstrip(" .")
+                suf = Path(clean_fname).suffix.lower()
+                name_low = clean_fname.lower()
                 if not stat.S_ISREG(pst.st_mode):
                     if suf == ".log":
                         unreadable_or_symlink_logs += 1
@@ -1242,9 +1314,7 @@ def inspect_chromium_storage_path(
                     ldb_files.append(p)
                 elif in_blob_subdir or suf == ".blob":
                     blob_files_count += 1
-                elif _is_sqlite_artifact(name_low, suf) or (
-                    suf in (".db", ".db3", ".vscdb", ".sdb") and _has_sqlite3_magic(p)
-                ):
+                elif _is_sqlite_artifact(name_low, suf) or _has_sqlite3_magic(p):
                     sqlite_files_count += 1
             if scan_truncated:
                 break
@@ -1281,12 +1351,54 @@ def inspect_chromium_storage_path(
             if rec.get("is_soft_deleted_in_ui"):
                 soft_deleted_records += 1
 
-    verified_sstables = sum(1 for f in ldb_files if _has_leveldb_sstable_magic(f))
+    from starshield.leveldb_sstable import (
+        MAX_STORE_TOTAL_UNCOMPRESSED_BYTES,
+        parse_leveldb_sstable,
+    )
+
+    verified_sstables = 0
+    unreadable_or_oversize_sstables = 0
+    sstable_blocks_verified = 0
+    sstable_corrupted_blocks = 0
+    sstable_zstd_blocks = 0
+    sstable_carvable_records = 0
+    sstable_tombstone_entries = 0
+    sst_budget = {"remaining": MAX_STORE_TOTAL_UNCOMPRESSED_BYTES}
+
+    for sf in ldb_files:
+        if _has_leveldb_sstable_magic(sf):
+            verified_sstables += 1
+        try:
+            raw_sst = read_bounded_bytes(sf, max_mb=max_mb, redact=redact, nofollow=True)
+        except (ValueError, OSError):
+            unreadable_or_oversize_sstables += 1
+            continue
+        sst_parsed = parse_leveldb_sstable(raw_sst, schema_mode=schema_mode, budget_state=sst_budget)
+        sstable_blocks_verified += sst_parsed["data_blocks_verified"]
+        sstable_corrupted_blocks += sst_parsed["corrupted_blocks_count"]
+        sstable_zstd_blocks += sst_parsed["zstd_unsupported_blocks_count"]
+        sstable_tombstone_entries += sst_parsed["tombstone_entries_seen"]
+        sstable_carvable_records += sst_parsed["recovered_records_count"]
+        carvable_records += sst_parsed["recovered_records_count"]
+        v8_binary_only_values += sst_parsed["blink_v8_non_json_values_skipped"]
+        for rec in sst_parsed["recovered_records"]:
+            st = str(rec.get("schema_detected", "unknown"))
+            schemas_seen[st] = schemas_seen.get(st, 0) + 1
+            if rec.get("is_soft_deleted_in_ui"):
+                soft_deleted_records += 1
+
     total_sstables_detected = len(ldb_files) + non_regular_sstable_entries
+    all_sstables_healthy = (
+        non_regular_sstable_entries == 0
+        and verified_sstables == len(ldb_files)
+        and unreadable_or_oversize_sstables == 0
+        and sstable_corrupted_blocks == 0
+        and sstable_zstd_blocks == 0
+    )
 
     if (
         carvable_records > 0
-        and total_sstables_detected == 0
+        and all_sstables_healthy
         and v8_binary_only_values == 0
         and blob_files_count == 0
         and sqlite_files_count == 0
@@ -1296,25 +1408,25 @@ def inspect_chromium_storage_path(
     ):
         verdict = "GO"
         guidance = (
-            "Uncompacted LevelDB .log frames contain carvable JSON records. "
+            "LevelDB .log / Snappy .ldb tables contain verified carvable records. "
             f"Eligible for immediate byte-offset-cited extraction under v{__version__}."
         )
     elif carvable_records > 0:
         verdict = "PARTIAL"
         guidance = (
-            "Carvable JSON records are recoverable from uncompacted .log frames, alongside compacted "
-            ".ldb SSTables, external .blob entries, co-located SQLite storage files, binary-only Blink V8 "
-            f"values, oversize logs, or capped directory scans that fall outside v{__version__} scope."
+            "Carvable records are recoverable from LevelDB .log / Snappy .ldb tables, alongside "
+            "damaged/Zstandard SSTable blocks, external .blob entries, co-located SQLite storage files, "
+            f"binary-only Blink V8 values, oversize files, or capped directory scans outside v{__version__} scope."
         )
     else:
         verdict = "NO_GO_COMPACTED_OR_UNSUPPORTED"
         guidance = (
-            "Zero carvable JSON records found in uncompacted .log files (storage may already be compacted "
-            "into Snappy .ldb SSTables, encoded solely in binary Blink V8 StructuredClone, backed by "
+            "Zero carvable records found in LevelDB .log or Snappy .ldb files (storage may contain "
+            "corrupted/Zstandard SSTables, be encoded solely in binary Blink V8 StructuredClone, be backed by "
             "co-located SQLite storage files such as newly created Chrome 156+ SQLite IndexedDB while "
-            "existing LevelDB stores remain in LevelDB, or empty). For compacted .ldb SSTables or binary "
-            "Blink IndexedDB stores, use full LevelDB/Blink parsers such as dfindexeddb or "
-            "ccl_chromium_reader; for SQLite-backed stores, inspect with sqlite3."
+            "existing LevelDB stores remain in LevelDB, or be empty). For binary Blink IndexedDB stores, "
+            "use full Blink deserializers such as dfindexeddb or ccl_chromium_reader; for SQLite-backed "
+            "stores, inspect with sqlite3."
         )
 
     return {
@@ -1332,6 +1444,11 @@ def inspect_chromium_storage_path(
         "schemas_detected_counts": schemas_seen,
         "compacted_sstable_files_detected": total_sstables_detected,
         "verified_leveldb_sstables_count": verified_sstables,
+        "sstable_data_blocks_verified": sstable_blocks_verified,
+        "sstable_corrupted_blocks_count": sstable_corrupted_blocks,
+        "sstable_zstd_unsupported_blocks_count": sstable_zstd_blocks,
+        "sstable_carvable_records_count": sstable_carvable_records,
+        "sstable_tombstone_entries_count": sstable_tombstone_entries,
         "indexeddb_blob_files_detected": blob_files_count,
         "sqlite_files_detected": sqlite_files_count,
         "blink_v8_non_json_values_detected": v8_binary_only_values,

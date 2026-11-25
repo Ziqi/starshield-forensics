@@ -3,34 +3,34 @@ SPDX-FileCopyrightText: 2026 Ziqi Xiao (@Ziqi)
 SPDX-License-Identifier: MIT
 -->
 
-# Cross-Tool & Specification Reference Validation Summary (`starshield-forensics v0.3.11`)
+# Cross-Tool & Specification Reference Validation Summary (`starshield-forensics v0.4.0`)
 
 > [!IMPORTANT]
-> **Scope & Non-Accreditation Notice**: Open-source technical cross-validation summary documenting reproducible execution of `scripts/verify_cross_tool_forensics.py` (`538` vectors) against external open-source reference libraries (Google `dfindexeddb` and `Pillow`, when installed in an isolated QA virtual environment via `--require-external`) and published format specifications. **This document is an engineering verification record, NOT a claim of laboratory accreditation, regulatory compliance, or certification.** Note: Historical URL path `VALIDATION_REPORT_FSR_ISO17025.md` is retained solely to prevent broken external links from prior archival records; this file is excluded from the PyPI `sdist` (`MANIFEST.in`).
+> **Scope & Non-Accreditation Notice**: Open-source technical cross-validation summary documenting reproducible execution of `scripts/verify_cross_tool_forensics.py` (`542` vectors) against external open-source reference libraries (Google `dfindexeddb` and `Pillow`, when installed in an isolated QA virtual environment via `--require-external`) and published format specifications. **This document is an engineering verification record, NOT a claim of laboratory accreditation, regulatory compliance, or certification.** Note: Historical URL path `VALIDATION_REPORT_FSR_ISO17025.md` is retained solely to prevent broken external links from prior archival records; this file is excluded from the PyPI `sdist` (`MANIFEST.in`).
 
 ---
 
-## 1. Technical Scope (`v0.3.11`)
+## 1. Technical Scope (`v0.4.0`)
 
-`starshield-forensics` (`v0.3.11`) is a deterministic, zero-dependency, offline Python standard-library command-line toolkit for read-only pre-screening of:
-1. **Uncompacted Chromium & Electron LevelDB Write-Ahead Logs (`.log`)**: Frame-level recovery of `WriteBatch` records across 32,768-byte physical blocks (`FULL`, `FIRST`, `MIDDLE`, `LAST`) with Castagnoli CRC32C (`polynomial 0x82F63B78`, LevelDB `mask delta 0xA282EAD8`) verification, per-operation internal sequence progression, and UTF-8 / Blink UTF-16LE JSON extraction.
-2. **PNG (`RFC 2083`), JPEG (`ISO/IEC 10918-1`) & PDF (`ISO 32000-1`) Binary Containers**: Chunk-level IEEE 802.3 CRC-32 validation, bounded `zlib` decompression (`<= 16 MiB` single-chunk / `<= 32 MiB` cumulative per-file budget) of `iCCP` profiles, multi-segment JPEG `APP2` (`ICC_PROFILE`) reassembly, `ISO 15076-1` (`acsp`) 128-byte header parsing, `APP13` (`Photoshop 3.0\x008BIM`) resource block observation, and unified lexical PDF trailer `%%EOF` / `startxref` / `xref` counting (skipping stream spans, strings, hex strings, and comments) without substring false positives.
+`starshield-forensics` (`v0.4.0`) is a deterministic, zero-dependency, offline Python standard-library command-line toolkit for read-only pre-screening of:
+1. **Chromium & Electron LevelDB Write-Ahead Logs (`.log`), Snappy SSTables (`.ldb`), and `MANIFEST-*` Logs**: Frame-level recovery of `WriteBatch` records across 32,768-byte physical blocks (`FULL`, `FIRST`, `MIDDLE`, `LAST`) and compacted `.ldb` SSTables (`0x00` raw & `0x01` Snappy blocks, 48-byte Footer `0xdb4775248b80fb57`, 5-byte Castagnoli CRC32C block quarantine, Restart-Point prefix keys, `InternalKey` `0x01` value vs `0x00` tombstone unpacking, and multi-record `MANIFEST-*` `VersionEdit` state replay).
+2. **PNG (`RFC 2083`), JPEG (`ISO/IEC 10918-1`) & PDF (`ISO 32000-1`) Binary Containers**: Chunk-level IEEE 802.3 CRC-32 validation, bounded `zlib` decompression (`<= 16 MiB` single-chunk / `<= 32 MiB` cumulative per-file budget) of `iCCP` profiles, multi-segment JPEG `APP2` (`ICC_PROFILE`) reassembly, `ISO 15076-1` (`acsp`) 128-byte header parsing, `APP13` (`Photoshop 3.0\x008BIM`) resource block observation, and unified lexical PDF trailer `%%EOF` / `startxref` / `xref` counting (skipping stream spans, strings, hex strings, comments, and `obj..endobj`/`<<..>>`/`[..]` nesting) without substring false positives.
 3. **Identifier Check-Digit & Registry Syntax**: `ISO/IEC 7812` Luhn card check-digit verification, `ISO 13616` IBAN length and `ISO/IEC 7064` Mod 97-10 check-digit verification across all 89 registered SWIFT jurisdictions, and `ISO 9362` SWIFT/BIC country-code (`250` codes) and context verification. Check-digit verification confirms mathematical syntax only—it does NOT indicate fraud or prove that a payment occurred.
 
 ### Explicit Non-Goals & Epistemic Boundaries
-- **Not a Compacted `.ldb` SSTable Decompressor**: `v0.3.11` does not decompress Snappy `.ldb` SSTables, follow external `.blob` directories, decode non-JSON Blink `StructuredClone` primitives, or parse newly created Chrome 156+ SQLite IndexedDB stores. `starshield precheck` emits `NO_GO_COMPACTED_OR_UNSUPPORTED` when zero carvable `.log` JSON records exist, and emits `PARTIAL` rather than `GO` whenever any `.ldb`/`.sst`, `.blob`, or co-located SQLite storage entry is present.
+- **Remaining Storage Format Non-Goals**: `v0.4.0` does not decompress Zstandard (`0x02`) SSTable blocks (counted honestly via `zstd_unsupported_blocks_count`), reconstruct externalized `.blob` files, deserialize binary-only Blink V8 `StructuredClone` AST primitives, or parse newly created Chrome 156+ SQLite IndexedDB stores.
 - **Not an Image or PDF Forgery Detector**: Container `iCCP`, `APP13`/`8BIM`, and PDF `%%EOF`/`xref` observations are structural container checks accompanied by mandatory benign `alternative_explanations`.
 - **Standalone vs. External Dual-Tool Execution**: When `dfindexeddb` or `Pillow` is not installed, `scripts/verify_cross_tool_forensics.py` explicitly reports `STANDALONE SELF-CHECK ONLY` (`external_concordance_measured: false`) and never claims external concordance.
 
 ---
 
-## 2. Test Environment & Release Provenance (`v0.3.11`)
+## 2. Test Environment & Release Provenance (`v0.4.0`)
 
 | Parameter | Verified Value |
 | :--- | :--- |
-| **Subject Tool & Version** | `starshield-forensics v0.3.11` (`0` third-party runtime dependencies) |
+| **Subject Tool & Version** | `starshield-forensics v0.4.0` (`0` third-party runtime dependencies) |
 | **Validation Harness** | [`scripts/verify_cross_tool_forensics.py`](scripts/verify_cross_tool_forensics.py) (`starshield-cross-tool-validation/v1`) |
-| **Deterministic Zipapp (`starshield.pyz`)** | `7bdcf29b9471c19375251d24a9993d946224be167d5187735d2343262618a3b7` *(depends solely on `starshield/` runtime sources; verified in CI via `scripts/build_reproducible.py --verify`)* |
+| **Deterministic Zipapp (`starshield.pyz`)** | `19795b019d1f7f605f9bf7f17ba886bd261311faeac24bdb8488724c03086272` *(depends solely on `starshield/` runtime sources; verified in CI via `scripts/build_reproducible.py --verify`)* |
 | **Source Tarball (`sdist`), Wheel & SPDX 2.3 SBOM** | Cryptographically bound by the release-attached offline Ed25519-signed manifest `SHA256SUMS` + `SHA256SUMS.sig` (verified against [`KEYS.pub`](KEYS.pub)), GitHub Release Sigstore provenance (`multiple.intoto.jsonl`), and PyPI Trusted Publisher PEP 740 attestations *(archive digests are not duplicated inline in repository markdown to prevent post-build hash drift or self-referential tarball circularity)* |
 | **Zenodo Concept DOI** | [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) *(currently resolves to archived `v0.3.7`: `10.5281/zenodo.24156262`)* |
 | **Reference Python Runtime** | CPython `3.12.13` (`Darwin-arm64` QA venv) + Ubuntu GitHub Actions CI matrix (`3.10`, `3.11`, `3.12`, `3.13`) |
@@ -40,9 +40,9 @@ SPDX-License-Identifier: MIT
 
 ---
 
-## 3. Cross-Tool & Specification Matrix (`538` Total Vectors: `6 + 6 + 526`)
+## 3. Cross-Tool & Specification Matrix (`542` Total Vectors: `6 + 4 + 6 + 526`)
 
-When executed with `--require-external` (`dfindexeddb==20260210` and `Pillow==13.0.0` installed in an isolated QA venv), `starshield-forensics v0.3.11` passes all **`538` deterministic vectors** (`6` LevelDB WAL vectors, `6` PNG/JPEG container vectors, and `526` check-digit/registry vectors).
+When executed with `--require-external` (`dfindexeddb==20260210` and `Pillow==13.0.0` installed in an isolated QA venv), `starshield-forensics v0.4.0` passes all **`542` deterministic vectors** (`6` LevelDB WAL vectors, `4` LevelDB SSTable/MANIFEST vectors, `6` PNG/JPEG container vectors, and `526` check-digit/registry vectors).
 
 ### 3.1 Suite 1: Chromium LevelDB `.log` WAL Carving vs. Google `dfindexeddb` (`20260210`, `6` Vectors)
 
@@ -56,6 +56,15 @@ When executed with `--require-external` (`dfindexeddb==20260210` and `Pillow==13
 | **`S1-V06`** | Truncated mid-frame tail (`64 B` missing at EOF simulating power loss) | `400` | `1` valid / `1` corrupt / `1` rec | N/A (`ParserError` on EOF) | **PASS (StarShield preserved committed `seq 600001` & logged `1` truncated tail frame)** |
 
 - **Note 1 (`S1-V05` — Upstream Issue `google/dfindexeddb#92` / PR `#94`)**: `dfindexeddb 20260210` stores `PhysicalRecord.checksum` without verifying Castagnoli CRC32C (`polynomial 0x82F63B78`, `mask delta 0xA282EAD8`) prior to `WriteBatch` decoding, emitting the bit-flipped `seq 500002` record. `starshield-forensics` quarantines the corrupted frame (`corrupted_frames_count = 1`) and resynchronizes at byte `32,768`.
+
+### 3.1B Suite 1B: LevelDB `.ldb` SSTable, Snappy RLE & `MANIFEST-*` `VersionEdit` Verification (`4` Vectors)
+
+| Vector ID | Scenario & Structural Boundary | Reference Comparator | Result |
+| :--- | :--- | :--- | :---: |
+| **`S1B-V01`** | Hand-crafted Snappy overlapping RLE (`offset < length`) + prefix-compressed `.ldb` SSTable (`0x01`) | Independent raw-byte specification vector | **PASS (`100%` SHA-256 & `seq` match)** |
+| **`S1B-V02`** | Multi-block `.ldb` SSTable with 1-bit CRC32C flip in Block 0 + intact Block 1 recovery | Castagnoli `CRC32C` 5-byte trailer verifier | **PASS (`1` block quarantined, `1` intact recovered)** |
+| **`S1B-V03`** | Multi-record `MANIFEST-*` (`idb_cmp1`, `NewFile` L0/L1, `DeletedFile` eviction) | Google `dfindexeddb.leveldb.descriptor.FileReader` (`20260210`) | **PASS (`100%` `VersionEdit` concordance)** |
+| **`S1B-V04`** | Full store reconciliation (`LIVE_ACTIVE`, `UI_SOFT_DELETED`, `TOMBSTONED_HISTORICAL_RECOVERED`) on `examples/corrupted_leveldb_challenge` | End-to-end store reconciler invariant check | **PASS (`100%` state & sequence match)** |
 
 ### 3.2 Suite 2: PNG (`RFC 2083`) & JPEG (`ISO/IEC 10918-1`) Container Framing vs. `Pillow 13.0.0` (`6` Vectors)
 

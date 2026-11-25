@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2026 Ziqi Xiao
 # SPDX-License-Identifier: MIT
 """
-Regression & Security Invariant Suite for `starshield-forensics v0.3.11` (`tests/test_v039_upgrades.py`).
+Regression & Security Invariant Suite for `starshield-forensics v0.4.0` (`tests/test_v039_upgrades.py`).
 
 Covers:
   1. PDF lexical & stream-tracker edge-case regressions (stray `(`, unclosed dict before `/FlateDecode`,
@@ -16,7 +16,7 @@ Covers:
      `0600` `O_NOFOLLOW` atomic vault creation, `starshield shred-vault` overwrite+unlink, and
      one-way MCP airlock (neither `detokenize` nor `shred-vault` exposed over MCP).
   4. `starshield demo` keyed-HMAC schema backward-compatibility lock (`[REDACTED_HMAC:...]`).
-  5. Repo-wide banned-phrase hygiene, version parity (`0.3.11`), relative Markdown link closure,
+  5. Repo-wide banned-phrase hygiene, version parity (`0.4.0`), relative Markdown link closure,
      REUSE SPDX compliance, and pure Python `>= 3.10` stdlib AST gate.
 """
 
@@ -66,7 +66,7 @@ class TestV039Upgrades(unittest.TestCase):
     def test_version_and_zero_commercial_or_stale_strings(self) -> None:
         stale_ver = ".".join(("0", "3", "6"))
         banned_fee = " ".join(("pilot", "fee"))
-        self.assertEqual(__version__, "0.3.11")
+        self.assertEqual(__version__, "0.4.0")
         for py_file in (REPO_ROOT / "starshield").glob("*.py"):
             src = py_file.read_text(encoding="utf-8")
             self.assertIn("SPDX-License-Identifier: MIT", src, f"Missing SPDX in {py_file.name}")
@@ -77,7 +77,7 @@ class TestV039Upgrades(unittest.TestCase):
             empty_dir = Path(tmp) / "empty_store"
             empty_dir.mkdir()
             pre = inspect_chromium_storage_path(empty_dir, redact=True)
-            self.assertEqual(pre["tool_version"], "starshield-forensics/0.3.11")
+            self.assertEqual(pre["tool_version"], "starshield-forensics/0.4.0")
             self.assertIn("Chrome 156+", pre["intake_guidance"])
             self.assertNotIn(banned_fee, json.dumps(pre).lower())
 

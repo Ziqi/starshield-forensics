@@ -1,6 +1,6 @@
 # Security Assurance Case, Architecture & Scope Boundaries
 
-> **Structured Software Assurance Case (structured per NIST IR 7608)** for `starshield-forensics` (`v0.3.11`).
+> **Structured Software Assurance Case (structured per NIST IR 7608)** for `starshield-forensics` (`v0.4.0`).
 
 ---
 
@@ -21,10 +21,10 @@
         ┌───────────────────────┼───────────────────────┐
         ▼                       ▼                       ▼
   ┌───────────────┐     ┌───────────────┐     ┌─────────────────┐
-  │ `leveldb_log` │     │ `image_cont.` │     │ `ioc_validator` │
-  │ • 32KiB blocks│     │ • PNG CRC32   │     │ • ISO-7812 Luhn │
-  │ • CRC32C mask │     │ • Bounded zlib│     │ • 89-ctry IBAN  │
-  │ • SSTable mag.│     │ • JPEG APP2   │     │ • 250-code BIC  │
+  │ `leveldb_*`   │     │ `image/pdf`   │     │ `ioc_validator` │
+  │ • 32KiB WAL   │     │ • PNG CRC32   │     │ • ISO-7812 Luhn │
+  │ • Snappy .ldb │     │ • Bounded zlib│     │ • 89-ctry IBAN  │
+  │ • MANIFEST    │     │ • PDF %%EOF   │     │ • 250-code BIC  │
   └───────┬───────┘     └───────┬───────┘     └────────┬────────┘
           └─────────────────────┼──────────────────────┘
                                 ▼
@@ -44,7 +44,7 @@
 
 ### What Users CAN Expect
 - **Zero Network Exfiltration:** No module imports `urllib`, `http`, `socket`, or `ssl` at runtime; execution succeeds inside network-disconnected forensic VMs.
-- **Bounded Memory & Decompression Safety:** Input reads are capped by `--max-mb` (64 MiB default), and compressed PNG `iCCP` and PDF `/FlateDecode` streams enforce both a `16 MiB` (`16_777_216`) single-payload ceiling and a `32 MiB` (`33_554_432`) per-file cumulative decompression budget to defeat zip/zlib decompression bombs.
+- **Bounded Memory & Decompression Safety:** Input reads are capped by `--max-mb` (64 MiB default), compressed PNG `iCCP` and PDF `/FlateDecode` streams enforce a `16 MiB` (`16_777_216`) single-payload ceiling and a `32 MiB` (`33_554_432`) per-file cumulative decompression budget, and LevelDB Snappy `.ldb` SSTable blocks enforce both an upfront varint32 target-length check (`<= 16 MiB` per block without preallocation) and a `64 MiB` (`67_108_864`) cumulative store decompression budget plus Index `BlockHandle` deduplication to defeat decompression bombs.
 - **Default Screen/Log Pseudonymization:** Without `--unredacted`, identifiers are keyed via CSPRNG `secrets.token_bytes(32)` HMAC (with configurable digest agility via `--hmac-digest` and external key separation via `--hmac-key-file`), and error paths scrub filenames and raw snippets from `stderr`.
 - **Cryptographic Release Authenticity:** Official releases provide `SHA256SUMS` and detached OpenSSH `Ed25519` signatures (`SHA256SUMS.sig`) verifiable offline against `KEYS.pub`.
 
@@ -87,7 +87,7 @@ Forensic inputs (Chromium caches, screenshots, exported chat JSONs) originate fr
 | Weakness Class | CWE ID | Countermeasure & Verification Evidence |
 | :--- | :--- | :--- |
 | Arbitrary Code Execution / Deserialization | CWE-502 / CWE-94 | Never calls `eval`, `exec`, `pickle`, `marshal`, `yaml.load`, or `subprocess(..., shell=True)`. Verified via `Bandit` CI scan (`0` issues). |
-| Uncontrolled Resource Consumption / Zip Bomb | CWE-400 / CWE-409 | `--max-mb` pre-read + streaming `read_bounded_bytes()` gate, `16 MiB` single-chunk / `32 MiB` cumulative `zlib` budgets (`MAX_ICC_DECOMPRESSED_BYTES`, `MAX_TOTAL_ICC_DECOMPRESSED_BYTES`, `MAX_TOTAL_DECOMPRESSED_BYTES`), `4,096`-file `precheck` walk cap, and bounded varint loop (`shift <= 63`). |
+| Uncontrolled Resource Consumption / Zip Bomb | CWE-400 / CWE-409 | `--max-mb` pre-read + streaming `read_bounded_bytes()` gate, `16 MiB` single-chunk / `32 MiB` cumulative `zlib` budgets, `16 MiB` single-block / `64 MiB` cumulative Snappy `.ldb` decompression budgets with duplicate `BlockHandle` deduplication, `4,096`-file `precheck` walk cap, and bounded varint32/varint64 loops. |
 | Out-of-Bounds Read / Truncated Frame Handling | CWE-125 | Explicit `offset + length > len(data)` allowlist checks across LevelDB 7-byte headers, PNG 12-byte chunk frames, and JPEG segment lengths. |
 | Improper Input Validation | CWE-20 | Strict allowlists on `--schema` (`auto`, `chatsvc`, `generic-json`), `--hmac-digest` (`sha256`, `sha384`, `blake2b`), ISO-3166 alpha-2 (`250` codes), and ISO-13616 IBAN lengths (`89` countries). |
 | Use of Broken Crypto / Hardcoded Keys | CWE-327 / CWE-798 | Uses CSPRNG `secrets.token_bytes(32)` + `HMAC-SHA256` (with `--hmac-digest` agility and `--hmac-key-file` external key storage); zero MD5/SHA-1. |
@@ -97,18 +97,18 @@ Forensic inputs (Chromium caches, screenshots, exported chat JSONs) originate fr
 
 ## 6. Verification Evidence Summary
 
-1. **Automated Test Suite & Coverage (`>= 80%` Gate):** `tests/test_adversarial.py` + `benchmark/benchmark_suite.py` enforce **>= 80% statement coverage** across `starshield/` on Python 3.10–3.13 in `.github/workflows/ci.yml`.
+1. **Automated Test Suite & Coverage (`>= 85%` Gate):** `tests/` + `benchmark/benchmark_suite.py` enforce **>= 85% statement coverage** across `starshield/` on Python 3.10–3.13 in `.github/workflows/ci.yml`.
 2. **Static Security & Style Analysis:** `GitHub CodeQL`, `PyCQA Bandit`, and `Astral Ruff` execute automatically on every push/PR in CI with zero findings permitted.
 3. **Bit-for-Bit Reproducible Builds:** `scripts/build_reproducible.py --verify` builds `starshield.pyz` twice from source and asserts identical `SHA-256` digests in CI, paired with `scripts/generate_spdx_sbom.py --verify` for ISO/IEC 5962:2021 SPDX 2.3 SBOM verification.
-4. **Continuous Coverage-Guided & Mutation Fuzzing (`Fuzzing: 10/10`):** `tests/fuzz_parsers.py` + `.clusterfuzzlite/` (`google/clusterfuzzlite` + `Atheris` libFuzzer in `.github/workflows/cflite.yml`) continuously fuzz LevelDB 32 KiB WAL block reassembly, PNG `iCCP` zlib streams, multi-segment JPEG `APP2`/`8BIM` containers, and ISO-7812/13616/9362 checksum validators, achieving `10/10` on the OpenSSF Scorecard `Fuzzing` check (`8.0/10` overall).
-5. **Cross-Tool & Specification Test Harness (`538` Vectors):** `scripts/verify_cross_tool_forensics.py` verifies 538 deterministic vectors (`6` LevelDB WAL, `6` PNG/JPEG container, and `526` check-digit/registry vectors; compares against Google `dfindexeddb` and `Pillow` when installed in an isolated QA venv via `--require-external`).
+4. **Continuous Coverage-Guided & Mutation Fuzzing (`Fuzzing: 10/10`):** `tests/fuzz_parsers.py` + `.clusterfuzzlite/` (`google/clusterfuzzlite` + `Atheris` libFuzzer in `.github/workflows/cflite.yml`) continuously fuzz LevelDB 32 KiB WAL block reassembly, Snappy `.ldb` SSTable & `MANIFEST` decoding, PNG `iCCP` zlib streams, multi-segment JPEG `APP2`/`8BIM` & PDF containers, and ISO-7812/13616/9362 checksum validators, achieving `10/10` on the OpenSSF Scorecard `Fuzzing` check (`8.0/10` overall).
+5. **Cross-Tool & Specification Test Harness (`542` Vectors):** `scripts/verify_cross_tool_forensics.py` verifies 542 deterministic vectors (`6` LevelDB WAL, `4` LevelDB SSTable/MANIFEST, `6` PNG/JPEG container, and `526` check-digit/registry vectors; compares against Google `dfindexeddb` and `Pillow` when installed in an isolated QA venv via `--require-external`).
 
 ---
 
 ## 7. Architectural Format Boundaries & Explicit Non-Goals (`documentation_roadmap`)
 
-### Current Format & Evidentiary Boundaries (`v0.3.11`)
-- **Uncompacted LevelDB `.log` Scope:** Parses 32 KiB physical blocks and `WriteBatch` frames in uncompacted `.log` write-ahead logs; does **not** decompress Snappy-compressed `.ldb` SSTables, follow external `.blob` directories, decode non-JSON binary Blink V8 `StructuredClone` payloads, or inspect SQLite B-Tree / `-wal` stores (such as newly created Chrome 156+ IndexedDB stores).
+### Current Format & Evidentiary Boundaries (`v0.4.0`)
+- **LevelDB `.log` + Snappy `.ldb` + `MANIFEST` Scope:** Parses 32 KiB `.log` `WriteBatch` frames, uncompressed (`0x00`) & Snappy-compressed (`0x01`) `.ldb` SSTable blocks (verifying 5-byte Castagnoli CRC32C trailers), and `MANIFEST-*` `VersionEdit` state transitions to reconcile `LIVE_ACTIVE`, `UI_SOFT_DELETED`, and `TOMBSTONED_HISTORICAL_RECOVERED` records; does **not** decompress Zstandard (`0x02`) SSTable blocks, reconstruct externalized `.blob` files, deserialize binary-only Blink V8 `StructuredClone` AST objects, or inspect SQLite B-Tree / `-wal` stores (such as newly created Chrome 156+ IndexedDB stores).
 - **Container Structure Observation Only:** PNG, JPEG, and PDF container inspectors report deterministic structural markers (`CRC32`, `ICC_PROFILE`, structural trailer `%%EOF`, `/Info`, XMP) alongside benign explanations; they never claim pixel forgery or tamper authentication.
 
 ### Explicit Non-Goals (What the Project Intends NOT to Do)

@@ -575,7 +575,7 @@ class TestAdversarialForensics(unittest.TestCase):
             self.assertTrue(json.loads(img_buf.getvalue())["image_container_analysis"]["valid_container"])
 
     def test_26_mcp_stdio_server_tools_and_privacy_by_default(self) -> None:
-        """Verify MCP JSON-RPC 2.0 lifecycle, 7 read-only tools, dual framing, and zero-leak default redaction."""
+        """Verify MCP JSON-RPC 2.0 lifecycle, 8 read-only tools, dual framing, and zero-leak default redaction."""
         from starshield.mcp_server import handle_mcp_message, run_mcp_stdio_server
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -668,7 +668,7 @@ class TestAdversarialForensics(unittest.TestCase):
             self.assertEqual(by_id[3]["result"]["resources"], [])
             self.assertEqual(by_id[4]["result"]["resourceTemplates"], [])
             self.assertEqual(by_id[5]["result"]["prompts"], [])
-            self.assertEqual(len(by_id[6]["result"]["tools"]), 7)
+            self.assertEqual(len(by_id[6]["result"]["tools"]), 8)
 
             self.assertFalse(by_id[7]["result"]["isError"])
             pre_res = json.loads(by_id[8]["result"]["content"][0]["text"])

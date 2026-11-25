@@ -34,11 +34,11 @@ jobs:
           python scripts/generate_spdx_sbom.py \
             --verify \
             --verify-pyz /tmp/ci-dists/starshield.pyz \
-            --wheel /tmp/ci-dists/starshield_forensics-0.3.11-py3-none-any.whl \
-            --sdist /tmp/ci-dists/starshield_forensics-0.3.11.tar.gz \
+            --wheel /tmp/ci-dists/starshield_forensics-0.4.0-py3-none-any.whl \
+            --sdist /tmp/ci-dists/starshield_forensics-0.4.0.tar.gz \
             --require-dists \
-            --output /tmp/ci-dists/starshield-forensics-0.3.11.spdx.json
-          python -c "import json; d=json.load(open('/tmp/ci-dists/starshield-forensics-0.3.11.spdx.json')); assert len(d['packages']) == 3 and all(len(p.get('checksums', [])) == 1 for p in d['packages'])"
+            --output /tmp/ci-dists/starshield-forensics-0.4.0.spdx.json
+          python -c "import json; d=json.load(open('/tmp/ci-dists/starshield-forensics-0.4.0.spdx.json')); assert len(d['packages']) == 3 and all(len(p.get('checksums', [])) == 1 for p in d['packages'])"
 
   test-and-package:
     runs-on: ubuntu-latest
@@ -82,4 +82,4 @@ jobs:
           mkdir -p /tmp/precheck_smoke && starshield precheck /tmp/precheck_smoke > /tmp/pre_out.json
           python -c "import json; p=json.load(open('/tmp/pre_out.json')); assert p['precheck_manifest']['feasibility_verdict'] == 'NO_GO_COMPACTED_OR_UNSUPPORTED'"
           printf '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n' | starshield mcp > /tmp/mcp_out.json
-          python -c "import json; m=json.load(open('/tmp/mcp_out.json')); assert len(m['result']['tools']) == 7"
+          python -c "import json; m=json.load(open('/tmp/mcp_out.json')); assert len(m['result']['tools']) == 8"

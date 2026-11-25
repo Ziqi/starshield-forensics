@@ -62,6 +62,14 @@ from starshield.leveldb_log import (  # noqa: E402
     encode_logical_record_across_blocks,
     parse_leveldb_wal,
 )
+from starshield.leveldb_sstable import (  # noqa: E402
+    build_leveldb_sstable,
+    build_version_edit,
+    decompress_snappy,
+    pack_internal_key,
+    parse_leveldb_manifest,
+    parse_leveldb_sstable,
+)
 
 EXPECTED_EXH01_LEN = 68779
 EXPECTED_EXH01_SHA256 = "c2ac19e91535c2a641023ac96893c2d5c25a38c3e5f507254e91e75bf6b172ff"
@@ -600,6 +608,162 @@ def run_suite_1_leveldb(has_dfindexeddb: bool) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Suite 1B: LevelDB `.ldb` SSTable (Snappy/Raw) & `MANIFEST` Raw-Byte Check
+# ---------------------------------------------------------------------------
+
+
+def _ref_read_sstable_raw_ops(raw: bytes) -> List[Tuple[bytes, int, int, bytes]]:
+    """Independent reference LevelDB SSTable reader verifying raw (user_key, seq, op_type, value) bytes."""
+    _require(len(raw) >= 48 and raw[-8:] == struct.pack("<Q", 0xDB4775248B80FB57), "Invalid SSTable footer")
+    footer = raw[-48:-8]
+    p = 0
+    _mo, p = _ref_decode_varint(footer, p)
+    _ms, p = _ref_decode_varint(footer, p)
+    idx_off, p = _ref_decode_varint(footer, p)
+    idx_sz, p = _ref_decode_varint(footer, p)
+
+    def load_blk(off: int, sz: int) -> bytes:
+        body = raw[off : off + sz]
+        ctype = raw[off + sz]
+        stored = struct.unpack_from("<I", raw, off + sz + 1)[0]
+        raw_c = crc32c(body + bytes([ctype]))
+        calc = (((raw_c >> 15) | ((raw_c << 17) & 0xFFFFFFFF)) + 0xA282EAD8) & 0xFFFFFFFF
+        _require(calc == stored, "Reference SSTable block CRC32C mismatch")
+        if ctype == 0:
+            return body
+        if ctype == 1:
+            return decompress_snappy(body)
+        raise ValueError(f"Unsupported compression {ctype}")
+
+    def decode_entries(buf: bytes) -> List[Tuple[bytes, bytes]]:
+        n_res = struct.unpack_from("<I", buf, len(buf) - 4)[0]
+        limit = len(buf) - 4 * (n_res + 1)
+        pos = 0
+        prev = b""
+        out_kv: List[Tuple[bytes, bytes]] = []
+        while pos < limit:
+            sh, pos = _ref_decode_varint(buf, pos)
+            non_sh, pos = _ref_decode_varint(buf, pos)
+            vlen, pos = _ref_decode_varint(buf, pos)
+            key = prev[:sh] + buf[pos : pos + non_sh]
+            pos += non_sh
+            val = buf[pos : pos + vlen]
+            pos += vlen
+            prev = key
+            out_kv.append((key, val))
+        return out_kv
+
+    idx_entries = decode_entries(load_blk(idx_off, idx_sz))
+    all_ops: List[Tuple[bytes, int, int, bytes]] = []
+    for _ikey, hval in idx_entries:
+        hp = 0
+        doff, hp = _ref_decode_varint(hval, hp)
+        dsz, hp = _ref_decode_varint(hval, hp)
+        for ikey, val in decode_entries(load_blk(doff, dsz)):
+            ukey = ikey[:-8]
+            tag = struct.unpack_from("<Q", ikey, len(ikey) - 8)[0]
+            all_ops.append((ukey, tag >> 8, tag & 0xFF, val))
+    return all_ops
+
+
+def run_suite_1b_sstable_and_manifest(has_dfindexeddb: bool) -> Dict[str, Any]:
+    df_desc = None
+    if has_dfindexeddb:
+        from dfindexeddb.leveldb import descriptor as _df_desc
+
+        df_desc = _df_desc
+
+    expected_ops = [
+        (b"idb:key:alpha", 7010, 1, b'{"id":"sst_a","from":"8:live:u1","content":"GBP 18,400.00"}'),
+        (b"idb:key:beta", 7008, 0, b""),
+        (b"idb:key:beta", 7002, 1, b'{"id":"sst_b","from":"8:live:u1","content":"Historical before delete"}'),
+        (b"idb:key:gamma", 7005, 1, b'{"id":"sst_g","from":"8:live:u2","content":"Repeated ' + (b"R" * 400) + b'"}'),
+    ]
+
+    sst_snappy = build_leveldb_sstable(expected_ops, compress=True, block_target_bytes=160)
+    sst_raw = build_leveldb_sstable(expected_ops, compress=False, block_target_bytes=160)
+
+    for label_v, sst_bytes in (("S1B-V01-Snappy", sst_snappy), ("S1B-V02-Raw", sst_raw)):
+        collected: List[Dict[str, Any]] = []
+        parsed = parse_leveldb_sstable(sst_bytes, collect_raw_ops=collected)
+        _require(parsed["corrupted_blocks_count"] == 0, f"{label_v} unexpected block corruption")
+        got_tuples = [(op["user_key"], op["seq_num"], op["op_type"], op["val_bytes"]) for op in collected]
+        ref_tuples = _ref_read_sstable_raw_ops(sst_bytes)
+        _require(got_tuples == ref_tuples, f"{label_v} raw key/value tuple mismatch vs reference")
+        _require(len(got_tuples) == 4 and parsed["tombstone_entries_seen"] == 1, f"{label_v} tombstone count mismatch")
+
+    # S1B-V03: Corrupt first data block byte -> quarantined via 5-byte block CRC32C while later blocks survive
+    corrupt_sst = bytearray(sst_snappy)
+    corrupt_sst[2] ^= 0x01
+    parsed_corrupt = parse_leveldb_sstable(bytes(corrupt_sst))
+    _require(
+        parsed_corrupt["corrupted_blocks_count"] == 1 and parsed_corrupt["data_blocks_verified"] >= 1,
+        "S1B-V03 expected 1 CRC32C-quarantined SSTable block with remaining blocks verified",
+    )
+
+    # S1B-V04: Multi-edit MANIFEST replay cross-validated against Google dfindexeddb.leveldb.descriptor
+    ve1 = build_version_edit(
+        comparator="idb_cmp1",
+        log_number=4,
+        next_file_number=3,
+        last_sequence=7000,
+        new_files=[(1, 1, 512, pack_internal_key(b"a", 1, 1), pack_internal_key(b"z", 2, 1))],
+    )
+    ve2 = build_version_edit(
+        log_number=6,
+        next_file_number=7,
+        last_sequence=7010,
+        deleted_files=[(1, 1)],
+        new_files=[
+            (1, 3, len(sst_snappy), pack_internal_key(b"a", 7002, 1), pack_internal_key(b"z", 7010, 1)),
+            (0, 5, 256, pack_internal_key(b"b", 7008, 0), pack_internal_key(b"b", 7008, 0)),
+        ],
+    )
+    man_bytes = encode_leveldb_log_record(REC_FULL, ve1) + encode_leveldb_log_record(REC_FULL, ve2)
+    ss_man = parse_leveldb_manifest(man_bytes)
+    _require(
+        ss_man["comparator_name"] == "idb_cmp1"
+        and ss_man["version_edits_applied"] == 2
+        and ss_man["active_file_levels"] == {3: 1, 5: 0}
+        and ss_man["deleted_file_events_count"] == 1,
+        f"S1B-V04 MANIFEST state mismatch: {ss_man}",
+    )
+
+    if df_desc is not None:
+        with tempfile.NamedTemporaryFile(prefix="MANIFEST-", delete=True) as tf:
+            tf.write(man_bytes)
+            tf.flush()
+            d_reader = df_desc.FileReader(tf.name)
+            df_edits = list(d_reader.GetVersionEdits())
+            _require(len(df_edits) == ss_man["version_edits_applied"], "dfindexeddb MANIFEST VersionEdit count mismatch")
+            _require(
+                df_edits[0].comparator == b"idb_cmp1",
+                "dfindexeddb MANIFEST comparator mismatch",
+            )
+            df_active_levels = {}
+            for ve in df_edits:
+                for df_del in ve.deleted_files:
+                    df_active_levels.pop(df_del.number, None)
+                for df_new in ve.new_files:
+                    df_active_levels[df_new.number] = df_new.level
+            _require(
+                df_active_levels == ss_man["active_file_levels"],
+                "dfindexeddb vs StarShield MANIFEST active file set mismatch",
+            )
+
+    return {
+        "suite": "Suite 1B - LevelDB .ldb SSTable (Snappy/Raw) & MANIFEST Raw-Byte Verification",
+        "external_comparator": (
+            "google/dfindexeddb.leveldb.descriptor + Reference SSTable/Snappy Verifier"
+            if has_dfindexeddb
+            else "Reference SSTable/Snappy Verifier (stdlib self-check)"
+        ),
+        "vectors_tested": 4,
+        "concordance_measured": bool(has_dfindexeddb),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Suite 2: Structural PNG & JPEG Container + ISO 15076-1 ICC Cross-Validation
 # ---------------------------------------------------------------------------
 
@@ -875,16 +1039,22 @@ def main(argv: List[str] | None = None) -> int:
 
     t0 = time.perf_counter()
     s1 = run_suite_1_leveldb(has_dfindexeddb=has_dfindexeddb)
+    s1b = run_suite_1b_sstable_and_manifest(has_dfindexeddb=has_dfindexeddb)
     s2 = run_suite_2_containers(has_pillow=has_pillow)
     s3 = run_suite_3_iocs()
     elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-    total_vecs = int(s1["vectors_tested"]) + int(s2["vectors_tested"]) + int(s3["total_vectors_tested"])
+    total_vecs = (
+        int(s1["vectors_tested"])
+        + int(s1b["vectors_tested"])
+        + int(s2["vectors_tested"])
+        + int(s3["total_vectors_tested"])
+    )
     both_external = bool(has_dfindexeddb and has_pillow)
 
     summary: Dict[str, Any] = {
         "validation_schema": "starshield-cross-tool-validation/v1",
         "reference_specifications": [
-            "LevelDB log format (32 KiB blocks, Castagnoli CRC32C polynomial 0x82F63B78 + mask delta 0xA282EAD8)",
+            "LevelDB log, SSTable (.ldb), Snappy & MANIFEST formats (Castagnoli CRC32C polynomial 0x82F63B78 + mask delta 0xA282EAD8)",
             "RFC 2083 (PNG), ISO/IEC 10918-1 (JPEG), ISO 15076-1 (ICC acsp)",
             "ISO/IEC 7812 (Luhn), ISO 13616 (IBAN Mod 97-10), ISO 9362 (SWIFT/BIC)",
         ],
@@ -910,6 +1080,7 @@ def main(argv: List[str] | None = None) -> int:
         },
         "suites": {
             "suite_1_leveldb_wal": s1,
+            "suite_1b_leveldb_sstable_manifest": s1b,
             "suite_2_image_containers": s2,
             "suite_3_financial_iocs": s3,
         },

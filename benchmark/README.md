@@ -1,4 +1,4 @@
-# `StarShield-Bench-24` (`v1.0.0` · Paired with `starshield-forensics v0.3.11`)
+# `StarShield-Bench-24` (`v1.0.0` · Paired with `starshield-forensics v0.4.0`)
 
 > **24-Case Deterministic Offline Endpoint Triage & Parser Resilience Suite**  
 > **Author:** Ziqi Xiao (`@Ziqi`) · **Concept DOI:** [`10.5281/zenodo.24145804`](https://doi.org/10.5281/zenodo.24145804) *(currently resolves to archived `v0.3.7`)* · **License:** MIT · **Classification:** `TLP:CLEAR (100% Synthetic)`

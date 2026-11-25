@@ -78,7 +78,9 @@ _XREF_STREAM_RE = re.compile(
     rb"/(?:X|#58)(?:R|#52)(?:e|#65)(?:f|#66)"
     rb"(?=[\x00\t\n\x0c\r ()<>\[\]{}/%]|$)"
 )
-_TOP_PDF_LEX_RE = re.compile(rb"<<|>>|[()%<>]")
+_TOP_PDF_LEX_RE = re.compile(
+    rb"\d{1,10}[\x00\t\n\x0c\r ]+\d{1,5}[\x00\t\n\x0c\r ]+obj\b|\bendobj\b|<<|>>|[()%\[\]<>]"
+)
 _STR_PDF_LEX_RE = re.compile(rb"(?:\\.)+|[()]", re.DOTALL)
 
 # C-compiled linear scanners eliminating unbounded dual find(b"\n")+find(b"\r") scans and slice copies
@@ -94,7 +96,7 @@ _FAST_INTERESTING_RE = re.compile(
 )
 _LEX_TRIGGER_RE = re.compile(
     rb"(?:%[^\r\n]*[\r\n]?|\([^()\\\r\n]*\)|</)+|"
-    rb"<<|>>|\bendobj\b|\bendstream\b|"
+    rb"<<|>>|\d{1,10}[\x00\t\n\x0c\r ]+\d{1,5}[\x00\t\n\x0c\r ]+obj\b|\bendobj\b|\bendstream\b|"
     rb"[%(<]|"
     rb"/(?:Producer|Creator|Author|Title|Subject|CreationDate|ModDate|"
     rb"JS|JavaScript|Launch|EmbeddedFiles?|OpenAction|AcroForm)"
@@ -858,10 +860,12 @@ class _StreamDictTracker:
         self,
         raw: bytes,
         on_lex_error: Callable[[int | None, str], None] | None = None,
+        *,
+        start_pos: int = 0,
     ) -> None:
         self.raw = raw
         self.n = len(raw)
-        self.lex_pos = 0
+        self.lex_pos = max(0, start_pos)
         self.open_stack: List[int] = []
         self.last_closed_dict: tuple[int, int] | None = None
         self.unclosed_budget = MAX_UNCLOSED_RECOVERY_BUDGET
@@ -927,6 +931,15 @@ class _StreamDictTracker:
                     self.lex_pos = tok_end
                     continue
                 if not self.open_stack:
+                    if self.in_indirect_obj:
+                        ind_end, ind_closed = _scan_pdf_literal_string(
+                            raw,
+                            tok_start,
+                            max_scan=max(0, min(stream_pos - tok_start - 1, MAX_PDF_STRING_SCAN_BYTES)),
+                        )
+                        if ind_closed:
+                            self.lex_pos = ind_end
+                            continue
                     resync_hi = min(stream_pos, tok_start + 1 + MAX_STREAM_DICT_BYTES)
                     resync_off = _find_earliest_stage2_resync(raw, tok_start + 1, resync_hi)
                     if not self.in_indirect_obj:
@@ -1130,6 +1143,7 @@ def _scan_pdf_lexical_tokens(
     risk_counts: Dict[str, int],
     on_info_cap: Callable[[int], None] | None = None,
     on_lex_error: Callable[[int | None, str], None] | None = None,
+    start_offset: int = 0,
 ) -> None:
     """
     Single-pass C-accelerated O(N) PDF lexical scanner outside comments, strings, and binary streams.
@@ -1139,11 +1153,13 @@ def _scan_pdf_lexical_tokens(
     (`R4-H1`), and skips `<hex>` runs via `_NON_HEX_WS_RE` with zero quadratic paths.
     """
     n = len(buf)
-    pos = 0
+    init_pos = max(0, start_offset)
+    pos = init_pos
     spans = skip_spans or []
     span_idx = 0
     num_spans = len(spans)
     dict_depth = 0
+    in_indirect_obj = False
 
     while pos < n:
         while span_idx < num_spans and pos >= spans[span_idx][1]:
@@ -1155,7 +1171,7 @@ def _scan_pdf_lexical_tokens(
             continue
 
         seg_end = spans[span_idx][0] if span_idx < num_spans else n
-        if pos == 0 or (span_idx > 0 and pos == spans[span_idx - 1][1]):
+        if pos == init_pos or (span_idx > 0 and pos == spans[span_idx - 1][1]):
             if _FAST_INTERESTING_RE.search(buf, pos, seg_end) is None:
                 if span_idx < num_spans:
                     pos = spans[span_idx][1]
@@ -1184,9 +1200,17 @@ def _scan_pdf_lexical_tokens(
                 dict_depth -= 1
             pos = m.end()
             continue
+        if 0x30 <= lead <= 0x39:  # 'N G obj'
+            if idx == 0 or (buf[idx - 1] in _PDF_WS_OR_DELIM and buf[idx - 1] != 0x2F):
+                dict_depth = 0
+                in_indirect_obj = True
+            pos = m.end()
+            continue
         if lead == ord("e"):  # 'endobj' or 'endstream'
             if idx == 0 or (buf[idx - 1] in _PDF_WS_OR_DELIM and buf[idx - 1] != 0x2F):
                 dict_depth = 0
+                if buf[idx : m.end()] == b"endobj":
+                    in_indirect_obj = False
             pos = m.end()
             continue
 
@@ -1201,6 +1225,15 @@ def _scan_pdf_lexical_tokens(
         if lead == 0x28:  # multi-line, nested, escaped, or unclosed '(' literal string
             win_hi = min(seg_end, idx + 1 + MAX_STREAM_DICT_BYTES)
             if dict_depth == 0:
+                if in_indirect_obj:
+                    ind_end, ind_closed = _scan_pdf_literal_string(
+                        buf,
+                        idx,
+                        max_scan=max(0, min(seg_end - idx - 1, MAX_PDF_STRING_SCAN_BYTES)),
+                    )
+                    if ind_closed:
+                        pos = ind_end
+                        continue
                 resync_off = _find_earliest_stage2_resync(buf, idx + 1, win_hi)
                 if resync_off is not None:
                     sub_end, sub_closed = _scan_pdf_literal_string(
@@ -1459,22 +1492,26 @@ def _scan_structural_eof_offsets(
     *,
     header_offset: int = -1,
     header_end: int = -1,
-) -> tuple[List[int], int, int, List[tuple[int, int]]]:
+) -> tuple[List[int], int, int, List[tuple[int, int]], List[tuple[int, int]]]:
     """
-    Unified single-pass O(N) lexical scanner for structural PDF trailer `%%EOF` markers and
-    plain top-level PDF code windows (excluding streams, `(...)` strings, `<...>` hex strings,
-    and `%...EOL` comments).
+    Unified single-pass O(N) lexical scanner for structural PDF trailer `%%EOF` markers,
+    top-level trailer windows (`not in_obj and dict_depth == 0 and array_depth == 0`), and
+    plain non-stream/non-string/non-comment PDF code windows.
 
-    Shared across `eof_offsets`, `startxref_offsets`, `xref_offsets`, and `xref_stream_offsets`
-    so neither embedded stream payloads, string/hex literals (valid or malformed), nor header/body
-    `%` comments can spoof or mismatch trailer markers.
+    Prevents bare `%%EOF`, `startxref`, or `xref` tokens inside indirect `obj..endobj` bodies,
+    `<<...>>` dictionaries, or `[...]` arrays from polluting structural revision counts while
+    still preserving `code_windows` for `/Type /XRef` stream dictionary detection.
     """
     eof_offsets: List[int] = []
     code_windows: List[tuple[int, int]] = []
+    top_trailer_windows: List[tuple[int, int]] = []
     total_eof_count = 0
     last_eof_offset = -1
     n = len(raw)
     scan_start = header_offset if header_offset > 0 else 0
+    in_obj = False
+    dict_depth = 0
+    array_depth = 0
 
     for win_lo, win_hi in _build_non_stream_windows(n, raw_stream_spans):
         if win_hi <= scan_start:
@@ -1483,6 +1520,9 @@ def _scan_structural_eof_offsets(
             win_lo = scan_start
         pos = win_lo
         code_start = win_lo
+        top_start: int | None = (
+            win_lo if (not in_obj and dict_depth == 0 and array_depth == 0) else None
+        )
         paren_depth = 0
         open_paren_offset = win_lo
         while pos < win_hi:
@@ -1500,6 +1540,9 @@ def _scan_structural_eof_offsets(
                     pos = idx + 1
                     if paren_depth == 0:
                         code_start = pos
+                        top_start = (
+                            pos if (not in_obj and dict_depth == 0 and array_depth == 0) else None
+                        )
                 else:
                     pos = m.end()
                 continue
@@ -1513,16 +1556,68 @@ def _scan_structural_eof_offsets(
             if tok == b"(":
                 if code_start < idx:
                     code_windows.append((code_start, idx))
+                if top_start is not None and top_start < idx:
+                    top_trailer_windows.append((top_start, idx))
+                top_start = None
                 paren_depth = 1
                 open_paren_offset = idx
                 pos = idx + 1
                 continue
-            if tok in (b"<<", b">>"):
+            if tok == b"<<":
+                if top_start is not None and top_start < idx:
+                    top_trailer_windows.append((top_start, idx))
+                top_start = None
+                dict_depth += 1
                 pos = idx + 2
+                continue
+            if tok == b">>":
+                if dict_depth > 0:
+                    dict_depth -= 1
+                pos = idx + 2
+                if not in_obj and dict_depth == 0 and array_depth == 0 and top_start is None:
+                    top_start = pos
+                continue
+            if tok == b"[":
+                if top_start is not None and top_start < idx:
+                    top_trailer_windows.append((top_start, idx))
+                top_start = None
+                array_depth += 1
+                pos = idx + 1
+                continue
+            if tok == b"]":
+                if array_depth > 0:
+                    array_depth -= 1
+                pos = idx + 1
+                if not in_obj and dict_depth == 0 and array_depth == 0 and top_start is None:
+                    top_start = pos
+                continue
+            if tok == b"endobj":
+                if idx == 0 or (raw[idx - 1] in _PDF_WS_OR_DELIM and raw[idx - 1] != 0x2F):
+                    in_obj = False
+                    dict_depth = 0
+                    array_depth = 0
+                    pos = m.end()
+                    if top_start is None:
+                        top_start = pos
+                else:
+                    pos = m.end()
+                continue
+            if 0x30 <= tok[0] <= 0x39:  # 'N G obj'
+                if idx == 0 or (raw[idx - 1] in _PDF_WS_OR_DELIM and raw[idx - 1] != 0x2F):
+                    if top_start is not None and top_start < idx:
+                        top_trailer_windows.append((top_start, idx))
+                    top_start = None
+                    in_obj = True
+                    dict_depth = 0
+                    array_depth = 0
+                pos = m.end()
                 continue
             if tok == b"<":
                 if code_start < idx:
                     code_windows.append((code_start, idx))
+                if top_start is not None and top_start < idx:
+                    top_trailer_windows.append((top_start, idx))
+                top_start = None
                 close_gt = raw.find(b">", idx + 1, win_hi)
                 if close_gt == -1:
                     if add_error is not None:
@@ -1540,17 +1635,24 @@ def _scan_structural_eof_offsets(
                         )
                     pos = close_gt + 1
                     code_start = pos
+                    if not in_obj and dict_depth == 0 and array_depth == 0:
+                        top_start = pos
                 continue
             if tok in (b")", b">"):
                 pos = m.end()
                 continue
 
-            # tok == b"%": flush preceding plain code, then distinguish structural `%%EOF` vs `%...EOL` comment
+            # tok == b"%": flush preceding plain code, then distinguish top-level `%%EOF` vs `%...EOL` comment
             if code_start < idx:
                 code_windows.append((code_start, idx))
+            if top_start is not None and top_start < idx:
+                top_trailer_windows.append((top_start, idx))
+            top_start = None
 
+            is_top_level = not in_obj and dict_depth == 0 and array_depth == 0
             if (
-                raw[idx : idx + 5] == b"%%EOF"
+                is_top_level
+                and raw[idx : idx + 5] == b"%%EOF"
                 and (idx == 0 or raw[idx - 1] in _PDF_WS_BYTES or raw[idx - 1] in b")>]}")
                 and (idx + 5 >= n or raw[idx + 5] in _PDF_WS_BYTES)
             ):
@@ -1562,6 +1664,7 @@ def _scan_structural_eof_offsets(
                     note_marker_cap(idx)
                 pos = min(win_hi, idx + 5)
                 code_start = pos
+                top_start = pos
                 continue
 
             eol_m = _EOL_RE.search(raw, idx + 1, win_hi)
@@ -1572,16 +1675,21 @@ def _scan_structural_eof_offsets(
             else:
                 pos = win_hi
             code_start = pos
+            if is_top_level:
+                top_start = pos
 
-        if paren_depth == 0 and code_start < win_hi:
-            code_windows.append((code_start, win_hi))
+        if paren_depth == 0:
+            if code_start < win_hi:
+                code_windows.append((code_start, win_hi))
+            if top_start is not None and top_start < win_hi:
+                top_trailer_windows.append((top_start, win_hi))
         elif paren_depth > 0 and add_error is not None:
             add_error(
                 open_paren_offset,
                 "Unterminated PDF literal string '(' encountered during structural trailer scan",
             )
 
-    return eof_offsets, total_eof_count, last_eof_offset, code_windows
+    return eof_offsets, total_eof_count, last_eof_offset, code_windows, top_trailer_windows
 
 
 def _scan_startxref_offsets(
@@ -1795,9 +1903,9 @@ def inspect_pdf_container(
     dec_info_seen: Dict[str, set[str]] = {}
     dec_risk_counts: Dict[str, int] = {}
     dict_header_cache: Dict[bytes, tuple[List[bytes], bool, int | None, bool]] = {}
-    tracker = _StreamDictTracker(raw, on_lex_error=add_error)
+    tracker = _StreamDictTracker(raw, on_lex_error=add_error, start_pos=header_offset)
 
-    cursor = 0
+    cursor = header_offset
     cached_end_pos = -2
     cached_struct_es_pos = -2
     total_decompressed_bytes = 0
@@ -2102,7 +2210,13 @@ def inspect_pdf_container(
             inspect_decoded_stream_payload(dec_bytes, pos, from_compressed=True)
 
     # Stage 2: Unified structural trailer/xref marker scan (skipping streams, strings, hex & comments)
-    eof_offsets, total_eof_count, last_eof_offset, structural_code_windows = _scan_structural_eof_offsets(
+    (
+        eof_offsets,
+        total_eof_count,
+        last_eof_offset,
+        structural_code_windows,
+        top_trailer_windows,
+    ) = _scan_structural_eof_offsets(
         raw,
         raw_stream_spans,
         note_marker_cap=note_marker_cap,
@@ -2117,7 +2231,7 @@ def inspect_pdf_container(
         raw,
         add_error,
         note_marker_cap,
-        windows=structural_code_windows,
+        windows=top_trailer_windows,
     )
     if len(startxref_offsets) > total_eof_count and not markers_capped:
         add_error(
@@ -2127,7 +2241,7 @@ def inspect_pdf_container(
 
     xref_offsets: List[int] = []
     xref_cap_hit = False
-    for win_lo, win_hi in structural_code_windows:
+    for win_lo, win_hi in top_trailer_windows:
         xref_cur = win_lo
         while xref_cur < win_hi:
             xpos = raw.find(b"xref", xref_cur, win_hi)
@@ -2177,6 +2291,7 @@ def inspect_pdf_container(
         risk_counts=risk_counts,
         on_info_cap=note_info_cap,
         on_lex_error=add_error,
+        start_offset=header_offset,
     )
 
     for k, vals in dec_info_out.items():

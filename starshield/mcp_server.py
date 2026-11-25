@@ -3,14 +3,15 @@
 """
 Deterministic, strictly offline Model Context Protocol (MCP) stdio server for `starshield-forensics`.
 
-Exposes seven read-only deterministic tools over JSON-RPC 2.0 (`stdio`):
-  1. `starshield_demo`                    — Clean-room synthetic showcase across all 5 engines (keyed HMAC mode)
+Exposes eight read-only deterministic tools over JSON-RPC 2.0 (`stdio`):
+  1. `starshield_demo`                    — Clean-room synthetic showcase across all engines (keyed HMAC mode)
   2. `starshield_precheck_leveldb`        — Zero-PII GO/PARTIAL/NO_GO_COMPACTED_OR_UNSUPPORTED LevelDB check
   3. `starshield_parse_leveldb_log`       — Structural `.log` WAL carver (`<IBAN_GB_9F3A_01>`, zero raw prose)
-  4. `starshield_triage_json`             — Structural exported JSON triage (`<ENTITY_9F3A_01>`, zero raw prose)
-  5. `starshield_inspect_image_tamper`    — PNG/JPEG ICC & 8BIM container structure observation (not tamper proof)
-  6. `starshield_validate_financial_iocs` — Offline Luhn, IBAN, SWIFT, ABA, RF, LEI, TRON & EIP-55 syntax check
-  7. `starshield_inspect_pdf_tamper`      — ISO 32000 PDF container structure & incremental revision observation
+  4. `starshield_parse_leveldb_store`     — Structural `.ldb`/`.log`/`MANIFEST` live-vs-tombstone reconciler
+  5. `starshield_triage_json`             — Structural exported JSON triage (`<ENTITY_9F3A_01>`, zero raw prose)
+  6. `starshield_inspect_image_tamper`    — PNG/JPEG ICC & 8BIM container structure observation (not tamper proof)
+  7. `starshield_validate_financial_iocs` — Offline Luhn, IBAN, SWIFT, ABA, RF, LEI, TRON & EIP-55 syntax check
+  8. `starshield_inspect_pdf_tamper`      — ISO 32000 PDF container structure & incremental revision observation
 
 Privacy-by-Default Structural Airlock:
   `starshield mcp` is NOT a natural-language prompt-injection detector or sanitizer. Instead, default
@@ -54,6 +55,7 @@ from starshield.leveldb_log import (
     sanitize_json_value,
     sanitize_utf8_str,
 )
+from starshield.leveldb_sstable import parse_leveldb_store
 from starshield.pdf_containers import apply_pdf_redaction, inspect_pdf_container
 from starshield.pseudonymizer import SessionPseudonymizer, extract_currency_amounts
 
@@ -140,6 +142,35 @@ MCP_TOOLS: list[Dict[str, Any]] = [
                 },
             },
             "required": ["log_path"],
+            "additionalProperties": False,
+        },
+        "annotations": _READ_ONLY_ANNOTATIONS,
+    },
+    {
+        "name": "starshield_parse_leveldb_store",
+        "title": "Parse LevelDB Store (.ldb SSTable + MANIFEST + .log) Structural Skeleton",
+        "description": (
+            "Carve compacted Snappy/uncompressed LevelDB .ldb SSTables, MANIFEST VersionEdits, and .log "
+            "write-ahead logs offline, reconciling LIVE_ACTIVE, UI_SOFT_DELETED, and "
+            "TOMBSTONED_HISTORICAL_RECOVERED records with per-block Castagnoli CRC32C verification. Default "
+            "masked mode withholds raw free-form prose and returns structural skeletons with visible numeric "
+            "currency amounts and session-fingerprinted <IBAN_GB_XXXX_01> / <ENTITY_XXXX_01> placeholders."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_path": {
+                    "type": "string",
+                    "description": "Local path to a read-only LevelDB directory or standalone .ldb/.sst/.log file.",
+                },
+                "schema_mode": {
+                    "type": "string",
+                    "enum": list(VALID_SCHEMA_MODES),
+                    "default": "auto",
+                    "description": "Record schema filter (default: auto; generic-json includes LocalStorage KV text).",
+                },
+            },
+            "required": ["target_path"],
             "additionalProperties": False,
         },
         "annotations": _READ_ONLY_ANNOTATIONS,
@@ -314,6 +345,36 @@ def _dispatch_tool_call(
                 "masked_mode": redact,
                 "acquisition_manifest": build_acquisition_manifest(raw_bytes, log_path.name, redact=redact),
                 "leveldb_wal_analysis": parsed_wal,
+            }
+            if active_pseudo is not None:
+                payload["pseudonym_session_id"] = active_pseudo.session_id
+                payload["pseudonym_session_tag"] = active_pseudo.session_tag
+                payload["pseudonym_token_counts"] = active_pseudo.token_counts()
+                if active_pseudo.cap_exceeded_categories():
+                    payload["pseudonym_cap_exceeded_categories"] = active_pseudo.cap_exceeded_categories()
+        elif tool_name == "starshield_parse_leveldb_store":
+            raw_target = arguments.get("target_path")
+            if not isinstance(raw_target, str) or not raw_target.strip():
+                raise SafeDiagnosticError("'target_path' must be a non-empty string")
+            schema_mode = arguments.get("schema_mode", "auto")
+            if not isinstance(schema_mode, str) or schema_mode not in VALID_SCHEMA_MODES:
+                raise SafeDiagnosticError(f"'schema_mode' must be one of {VALID_SCHEMA_MODES}")
+            target_path = Path(raw_target)
+            raw_store = parse_leveldb_store(
+                target_path,
+                max_mb=max_mb,
+                schema_mode=schema_mode,
+                redact=redact,
+            )
+            redacted_store = apply_wal_record_redaction(
+                raw_store,
+                redact=redact,
+                salt=session_salt,
+                pseudonymizer=active_pseudo,
+            )
+            payload = {
+                "masked_mode": redact,
+                "leveldb_store_analysis": redacted_store,
             }
             if active_pseudo is not None:
                 payload["pseudonym_session_id"] = active_pseudo.session_id
@@ -672,12 +733,46 @@ def _read_next_rpc_frame(instream: BinaryIO) -> Tuple[bytes | None, str, Dict[st
                         "error": {"code": -32600, "message": "Content-Length outside bounded range"},
                     },
                 )
-            # Consume remaining HTTP-style headers until blank line
+            # Consume remaining HTTP-style headers with strict line/byte budget until blank line
+            hdr_lines = 0
+            hdr_bytes = 0
             while True:
-                hdr_line = instream.readline(4096)
-                if not hdr_line or hdr_line in (b"\r\n", b"\n"):
+                hdr_line = instream.readline(4097)
+                if not hdr_line:
+                    return (
+                        b"",
+                        "content-length",
+                        {
+                            "jsonrpc": "2.0",
+                            "id": None,
+                            "error": {"code": -32700, "message": "Truncated HTTP-style MCP header block"},
+                        },
+                    )
+                if hdr_line in (b"\r\n", b"\n"):
                     break
+                hdr_lines += 1
+                hdr_bytes += len(hdr_line)
+                if len(hdr_line) > 4096 or hdr_lines > 32 or hdr_bytes > 16384:
+                    return (
+                        b"",
+                        "content-length",
+                        {
+                            "jsonrpc": "2.0",
+                            "id": None,
+                            "error": {"code": -32600, "message": "MCP header block exceeds 16 KiB / 32-header safety limit"},
+                        },
+                    )
             body = instream.read(content_len)
+            if len(body) != content_len:
+                return (
+                    b"",
+                    "content-length",
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32700, "message": "Truncated Content-Length JSON-RPC body"},
+                    },
+                )
             return body, "content-length", None
 
         return stripped, "line", None

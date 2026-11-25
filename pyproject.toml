@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "starshield-forensics"
-version = "0.3.11"
-description = "Deterministic, offline Chromium & Electron LevelDB (.log) carver, PNG/JPEG/PDF structural container inspector, identifier check-digit verifier, and read-only MCP server."
+version = "0.4.0"
+description = "Deterministic, offline Chromium & Electron LevelDB (.log & Snappy .ldb/MANIFEST) carver, PNG/JPEG/PDF structural container inspector, identifier check-digit verifier, and read-only MCP server."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -54,3 +54,6 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "W", "B"]
 ignore = ["E501"]
+
+[tool.bandit]
+targets = ["starshield", "scripts"]

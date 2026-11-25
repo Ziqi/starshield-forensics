@@ -40,6 +40,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from starshield.cli import (  # noqa: E402
     apply_image_redaction,
+    build_synthetic_leveldb_sstable_bytes,
     build_synthetic_leveldb_wal_bytes,
 )
 from starshield.image_containers import (  # noqa: E402
@@ -58,6 +59,11 @@ from starshield.ioc_validators import (  # noqa: E402
     tron_trc20_address_valid,
 )
 from starshield.leveldb_log import VALID_SCHEMA_MODES, parse_leveldb_wal  # noqa: E402
+from starshield.leveldb_sstable import (  # noqa: E402
+    decompress_snappy,
+    parse_leveldb_manifest,
+    parse_leveldb_sstable,
+)
 from starshield.pdf_containers import (  # noqa: E402
     apply_pdf_redaction,
     build_synthetic_incremental_pdf,
@@ -73,6 +79,23 @@ def fuzz_one_bytes(data: bytes) -> None:
     wal_res = parse_leveldb_wal(data, schema_mode=mode)
     if wal_res["corrupted_frames_count"] < 0 or wal_res["valid_physical_frames"] < 0:
         raise AssertionError("Negative frame count invariant violated")
+
+    sst_res = parse_leveldb_sstable(
+        data,
+        schema_mode=mode,
+        budget_state={"remaining": 4 * 1024 * 1024},
+    )
+    if sst_res["corrupted_blocks_count"] < 0 or sst_res["data_blocks_verified"] < 0:
+        raise AssertionError("Negative SSTable block count invariant violated")
+
+    man_res = parse_leveldb_manifest(data)
+    if man_res["version_edits_applied"] < 0 or man_res["corrupted_frames_count"] < 0:
+        raise AssertionError("Negative MANIFEST count invariant violated")
+
+    try:
+        decompress_snappy(data, max_uncompressed_bytes=1024 * 1024)
+    except (ValueError, BufferError):
+        pass
 
     img_res = inspect_image_container(data, label="fuzz_input")
     if not isinstance(img_res.get("valid_container"), bool):
@@ -273,6 +296,7 @@ def run_stdlib_campaign(iterations: int, seed: int) -> int:
     )
     seeds = [
         build_synthetic_leveldb_wal_bytes(),
+        build_synthetic_leveldb_sstable_bytes(),
         build_valid_png_with_iccp(profile_desc="Display P3", platform="APPL"),
         build_valid_jpeg_with_icc_and_8bim(profile_desc="sRGB IEC61966-2.1", platform="MSFT"),
         build_synthetic_incremental_pdf(),

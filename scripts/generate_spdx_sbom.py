@@ -23,10 +23,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from starshield import __version__ as STARSHIELD_VERSION  # noqa: E402
 
-RELEASE_VERSION = "0.3.11"
-CREATED_UTC = "2026-11-22T00:00:00Z"
+RELEASE_VERSION = "0.4.0"
+CREATED_UTC = "2026-11-25T00:00:00Z"
 
-PINNED_PYZ_SHA256 = "7bdcf29b9471c19375251d24a9993d946224be167d5187735d2343262618a3b7"
+PINNED_PYZ_SHA256 = "19795b019d1f7f605f9bf7f17ba886bd261311faeac24bdb8488724c03086272"
 
 
 def _sha256_file(path: Path) -> str:
@@ -108,8 +108,9 @@ def build_spdx_document(
                 "copyrightText": copyright_text,
                 "primaryPackagePurpose": "APPLICATION",
                 "summary": (
-                    "Offline Chromium/Electron LevelDB .log carver, PNG/JPEG/PDF container structure "
-                    "inspector, identifier checksum verifier, and structural MCP server."
+                    "Offline Chromium/Electron LevelDB .log & Snappy .ldb/MANIFEST carver, "
+                    "PNG/JPEG/PDF container structure inspector, identifier checksum verifier, "
+                    "and structural MCP server."
                 ),
                 "checksums": [
                     {

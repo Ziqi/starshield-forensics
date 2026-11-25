@@ -367,14 +367,14 @@ def mask_identifier(val: str, salt: bytes | None = None, digest_alg: str | None 
 
 
 _CARD_RE = re.compile(r"(?<![0-9])(?:4[0-9]|5[1-5]|62)(?:[\s-]?[0-9]){11,17}(?![0-9])")
-_IBAN_RE = re.compile(r"\b[A-Z]{2}[0-9]{2}(?:[\s-]?[A-Z0-9]){11,30}\b", re.ASCII)
+_IBAN_RE = re.compile(r"\b[A-Z]{2}[0-9]{2}(?:[ \t-]?[A-Z0-9]){11,30}\b", re.ASCII)
 _UK_SORT_RE = re.compile(r"(?<![0-9])[0-9]{2}-[0-9]{2}-[0-9]{2}(?![0-9])")
 _UK_ACC_RE = re.compile(r"(?<![0-9])[0-9]{8}(?![0-9])")
 _SWIFT_CTX_RE = re.compile(r"\b(?:swift|bic|routing|wire|beneficiary|iban)\b", re.IGNORECASE | re.ASCII)
 _BIC_RE = re.compile(r"\b([A-Z]{4})([A-Z]{2})([A-Z0-9]{2})([A-Z0-9]{3})?\b", re.ASCII)
 _ABA_RE = re.compile(r"(?<![0-9])([0-9]{9})(?![0-9])")
 _ABA_CTX_RE = re.compile(r"\b(?:aba|routing|rtn|ach|fedwire|wire|transit)\b", re.IGNORECASE | re.ASCII)
-_RF_RE = re.compile(r"\bRF[0-9]{2}(?:[\s-]?[A-Z0-9]){1,21}\b", re.ASCII)
+_RF_RE = re.compile(r"\bRF[0-9]{2}(?:[ \t-]?[A-Z0-9]){1,21}\b", re.ASCII)
 _LEI_RE = re.compile(r"\b([0-9A-Z]{18}[0-9]{2})\b", re.ASCII)
 _LEI_CTX_RE = re.compile(r"\b(?:lei|legal\s+entity)\b", re.IGNORECASE | re.ASCII)
 _TRON_RE = re.compile(r"\b(T[1-9A-HJ-NP-Za-km-z]{33})\b", re.ASCII)

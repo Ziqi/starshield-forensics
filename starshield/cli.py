@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2026 Ziqi Xiao
 # SPDX-License-Identifier: MIT
 """
-StarShield Forensics CLI v0.3.11 (`starshield`)
+StarShield Forensics CLI (`starshield`)
 Author: Ziqi Xiao (@Ziqi)
 License: MIT
 
@@ -69,6 +69,11 @@ from starshield.leveldb_log import (
     read_bounded_bytes,
     sanitize_json_value,
     sanitize_utf8_str,
+)
+from starshield.leveldb_sstable import (
+    build_leveldb_sstable,
+    parse_leveldb_sstable,
+    parse_leveldb_store,
 )
 from starshield.pdf_containers import (
     apply_pdf_redaction,
@@ -220,7 +225,19 @@ def apply_wal_record_redaction(
     out = copy.deepcopy(wal_parsed)
     run_salt = DEFAULT_EPHEMERAL_SALT if salt is None else salt
     if redact:
-        out["file_size_bytes"] = None
+        if "file_size_bytes" in out:
+            out["file_size_bytes"] = None
+        if "target_label" in out:
+            out["target_label"] = "[REDACTED_TARGET_PATH]"
+        if (
+            "manifest_comparator" in out
+            and out["manifest_comparator"] is not None
+            and out["manifest_comparator"] not in {"leveldb.BytewiseComparator", "idb_cmp1"}
+        ):
+            out["manifest_comparator"] = "[REDACTED_CUSTOM_COMPARATOR]"
+        for c_blk in out.get("corrupted_blocks_or_frames", []):
+            if isinstance(c_blk, dict) and "source_file" in c_blk:
+                c_blk["source_file"] = "[REDACTED_SOURCE_FILE]"
     for rec in out["recovered_records"]:
         raw_txt = rec["cached_content"]
         if redact and pseudonymizer is not None:
@@ -228,6 +245,8 @@ def apply_wal_record_redaction(
         else:
             rec["extracted_iocs"] = extract_validated_iocs(raw_txt, redact=redact, salt=run_salt)
         if redact:
+            if "source_file" in rec:
+                rec["source_file"] = "[REDACTED_SOURCE_FILE]"
             rec["key_sha256"] = "[OMITTED_IN_MASKED_MODE]"
             rec["value_sha256"] = "[OMITTED_IN_MASKED_MODE]"
             rec["message_id"] = redact_msg_id(rec["message_id"], salt=run_salt)
@@ -589,6 +608,34 @@ def build_synthetic_leveldb_wal_bytes() -> bytes:
     return part1 + part2
 
 
+def build_synthetic_leveldb_sstable_bytes() -> bytes:
+    """Build a spec-compliant Snappy-compressed `.ldb` SSTable with an active record and a tombstoned record."""
+    rec_active = json.dumps(
+        {
+            "id": "sst_spec_0101",
+            "from": "8:live:vendor_ops_01",
+            "composetime": "2025-03-19T09:00:00Z",
+            "content": "Confirmed settlement reference RF18539007547034 for EUR 12,500.00 to IBAN DE89370400440532013000.",
+        }
+    ).encode("utf-8")
+    rec_historical = json.dumps(
+        {
+            "id": "sst_spec_0100",
+            "from": "8:live:vendor_ops_01",
+            "composetime": "2025-03-19T08:15:00Z",
+            "content": "Superseded beneficiary draft IBAN GB82WEST12345698765432 prior to tombstone deletion.",
+        }
+    ).encode("utf-8")
+    return build_leveldb_sstable(
+        [
+            (b"idb:conv:0101", 2010, 1, rec_active),
+            (b"idb:conv:0100", 2005, 0, b""),
+            (b"idb:conv:0100", 2001, 1, rec_historical),
+        ],
+        compress=True,
+    )
+
+
 def build_demo_report(redact: bool = True, salt: bytes | None = None) -> Dict[str, Any]:
     run_salt = salt if salt is not None else secrets.token_bytes(32)
     try:
@@ -604,6 +651,8 @@ def build_demo_report(redact: bool = True, salt: bytes | None = None) -> Dict[st
 
     wal_bytes = build_synthetic_leveldb_wal_bytes()
     wal_parsed = apply_wal_record_redaction(parse_leveldb_wal(wal_bytes), redact=redact, salt=run_salt)
+    sst_bytes = build_synthetic_leveldb_sstable_bytes()
+    sst_parsed = apply_wal_record_redaction(parse_leveldb_sstable(sst_bytes), redact=redact, salt=run_salt)
 
     valid_png = build_valid_png_with_iccp(
         "Display P3",
@@ -622,6 +671,7 @@ def build_demo_report(redact: bool = True, salt: bytes | None = None) -> Dict[st
             redact=redact,
         ),
         "engine_1_raw_leveldb_wal_carver": wal_parsed,
+        "engine_1b_snappy_sstable_carver": sst_parsed,
         "engine_2_exported_json_triage": triage_exported_chatsvc_json(payload, redact=redact, salt=run_salt),
         "engine_3_timestamp_and_session_corroboration": corroborate_timestamps(payload, redact=redact, salt=run_salt),
         "engine_4a_structural_png_metadata": apply_image_redaction(
@@ -670,6 +720,11 @@ def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="starshield",
         description=f"StarShield Forensics v{__version__} — Deterministic Chromium Cache & Container Triage CLI",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"starshield-forensics {__version__}",
     )
     parser.add_argument(
         "--unredacted",
@@ -728,6 +783,18 @@ def main(argv: List[str] | None = None) -> int:
         choices=VALID_SCHEMA_MODES,
         default="auto",
         help="JSON record schema filter (default: auto — supports Teams/Skype, Slack, WhatsApp Web & B2B portals)",
+    )
+
+    p_store = sub.add_parser(
+        "parse-leveldb-store",
+        help="Parse Chromium/Electron LevelDB folder or Snappy .ldb SSTable with MANIFEST live-vs-tombstone reconciliation",
+    )
+    p_store.add_argument("target_path", type=Path, help="Read-only LevelDB directory or standalone .ldb/.sst/.log file")
+    p_store.add_argument(
+        "--schema",
+        choices=VALID_SCHEMA_MODES,
+        default="auto",
+        help="Record schema filter (default: auto; use generic-json to include LocalStorage KV string slices)",
     )
 
     p_rec = sub.add_parser("triage-json", help="Triage exported message JSON for soft-deleted records & validated IOCs")
@@ -825,6 +892,34 @@ def main(argv: List[str] | None = None) -> int:
             out = {
                 "acquisition_manifest": build_acquisition_manifest(raw, args.log_file.name, redact=redact),
                 "leveldb_wal_analysis": parsed,
+            }
+            if pseudo is not None:
+                out["pseudonym_session_id"] = pseudo.session_id
+                out["pseudonym_session_tag"] = pseudo.session_tag
+                out["pseudonym_token_counts"] = pseudo.token_counts()
+                if pseudo.cap_exceeded_categories():
+                    out["pseudonym_cap_exceeded_categories"] = pseudo.cap_exceeded_categories()
+            print(dumps_strict_json(out, indent=2))
+            return 0
+
+        if args.command == "parse-leveldb-store":
+            _guard_vault_not_same_file(args.vault_file, args.target_path)
+            raw_store = parse_leveldb_store(
+                args.target_path,
+                max_mb=args.max_mb,
+                schema_mode=args.schema,
+                redact=redact,
+            )
+            redacted_store = apply_wal_record_redaction(
+                raw_store,
+                redact=redact,
+                salt=run_salt,
+                pseudonymizer=pseudo,
+            )
+            if pseudo is not None and args.vault_file is not None:
+                pseudo.save_vault_atomic(args.vault_file)
+            out = {
+                "leveldb_store_analysis": redacted_store,
             }
             if pseudo is not None:
                 out["pseudonym_session_id"] = pseudo.session_id
