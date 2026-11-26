@@ -344,10 +344,13 @@ class TestV041PostReleaseFixes(unittest.TestCase):
                     load_vault_strict(v_file)
                 os.chmod(v_file, 0o600)
 
-            # 4. `detokenize` guards `args.vault` against aliasing `args.input`
+            # 4. `detokenize` guards `args.vault` against aliasing `args.input`, and CLI rejects option abbreviations (`--unred`)
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 rc_same = cli_main(["detokenize", "--vault", str(v_file), "--input", str(v_file)])
+                with self.assertRaises(SystemExit) as cm_abbrev:
+                    cli_main(["--unred", "demo"])
             self.assertEqual(rc_same, 2)
+            self.assertEqual(cm_abbrev.exception.code, 2)
 
             # 5. MCP cross-call evidence directory protection + non-dict `params` safety + strict Content-Length
             inside_vault = ev_dir / "mcp_inside_vault.json"

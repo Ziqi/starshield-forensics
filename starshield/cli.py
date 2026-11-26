@@ -863,6 +863,7 @@ def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="starshield",
         description=f"StarShield Forensics v{__version__} — Deterministic Chromium Cache & Container Triage CLI",
+        allow_abbrev=False,
     )
     parser.add_argument(
         "--version",
@@ -910,10 +911,11 @@ def main(argv: List[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("demo", help="Run deterministic triage pipeline on clean-room specification test vectors")
+    sub.add_parser("demo", allow_abbrev=False, help="Run deterministic triage pipeline on clean-room specification test vectors")
 
     p_pre = sub.add_parser(
         "precheck",
+        allow_abbrev=False,
         help="Zero-PII local GO/PARTIAL/NO-GO feasibility check on a Chromium storage folder or .log/.ldb file",
     )
     p_pre.add_argument("target_path", type=Path, help="Read-only Chromium IndexedDB/LevelDB folder or .log/.ldb file")
@@ -924,7 +926,11 @@ def main(argv: List[str] | None = None) -> int:
         help="JSON record schema filter (default: auto — supports Teams/Skype, Slack, WhatsApp Web & B2B portals)",
     )
 
-    p_wal = sub.add_parser("parse-leveldb-log", help="Parse Chromium IndexedDB LevelDB .log file with byte offsets & CRC32C")
+    p_wal = sub.add_parser(
+        "parse-leveldb-log",
+        allow_abbrev=False,
+        help="Parse Chromium IndexedDB LevelDB .log file with byte offsets & CRC32C",
+    )
     p_wal.add_argument("log_file", type=Path, help="Read-only copy of LevelDB .log write-ahead log")
     p_wal.add_argument(
         "--schema",
@@ -935,6 +941,7 @@ def main(argv: List[str] | None = None) -> int:
 
     p_store = sub.add_parser(
         "parse-leveldb-store",
+        allow_abbrev=False,
         help="Parse Chromium/Electron LevelDB folder or Snappy .ldb SSTable with MANIFEST live-vs-tombstone reconciliation",
     )
     p_store.add_argument("target_path", type=Path, help="Read-only LevelDB directory or standalone .ldb/.sst/.log file")
@@ -945,7 +952,11 @@ def main(argv: List[str] | None = None) -> int:
         help="Record schema filter (default: auto; use generic-json to include LocalStorage KV string slices)",
     )
 
-    p_rec = sub.add_parser("triage-json", help="Triage exported message JSON for soft-deleted records & validated IOCs")
+    p_rec = sub.add_parser(
+        "triage-json",
+        allow_abbrev=False,
+        help="Triage exported message JSON for soft-deleted records & validated IOCs",
+    )
     p_rec.add_argument("json_file", type=Path, help="Path to exported message JSON")
     p_rec.add_argument(
         "--schema",
@@ -954,23 +965,37 @@ def main(argv: List[str] | None = None) -> int:
         help="JSON record schema filter (default: auto)",
     )
 
-    p_sig = sub.add_parser("corroborate-timestamps", help="Verify timezone-aware UTC intervals and session metadata")
+    p_sig = sub.add_parser(
+        "corroborate-timestamps",
+        allow_abbrev=False,
+        help="Verify timezone-aware UTC intervals and session metadata",
+    )
     p_sig.add_argument("json_file", type=Path, help="Path to timestamp/session JSON")
 
-    p_img = sub.add_parser("inspect-image", help="Parse RFC 2083 PNG / ISO 10918 JPEG ICC & APP13 container metadata")
+    p_img = sub.add_parser(
+        "inspect-image",
+        allow_abbrev=False,
+        help="Parse RFC 2083 PNG / ISO 10918 JPEG ICC & APP13 container metadata",
+    )
     p_img.add_argument("image_file", type=Path, help="Path to PNG or JPEG image")
 
     p_pdf = sub.add_parser(
         "inspect-pdf",
+        allow_abbrev=False,
         help="Inspect PDF container structure, incremental save revisions (%%EOF/xref), XMP metadata & action cues",
     )
     p_pdf.add_argument("pdf_file", type=Path, help="Path to local PDF document")
 
-    p_dur = sub.add_parser("summarize-linguistics", help="Compute descriptive utterance length & punctuation statistics")
+    p_dur = sub.add_parser(
+        "summarize-linguistics",
+        allow_abbrev=False,
+        help="Compute descriptive utterance length & punctuation statistics",
+    )
     p_dur.add_argument("json_file", type=Path, help="Path to chat transcript JSON")
 
     p_detok = sub.add_parser(
         "detokenize",
+        allow_abbrev=False,
         help="Locally restore <IBAN_GB_9F3AC41D_01>/<TRC20_9F3AC41D_01>/<ENTITY_9F3AC41D_01> placeholders using a 0600 token vault file",
     )
     p_detok.add_argument("--vault", required=True, type=Path, help="Path to local starshield-token-vault/v1 JSON file")
@@ -979,6 +1004,7 @@ def main(argv: List[str] | None = None) -> int:
 
     p_shred = sub.add_parser(
         "shred-vault",
+        allow_abbrev=False,
         help=(
             "Best-effort logical overwrite (random + zero passes + fsync) and unlink of a local 0600 token vault file "
             "(does not guarantee physical block erasure on SSD/NVMe or APFS/Btrfs/ZFS CoW; prefer /dev/shm)"
@@ -993,6 +1019,7 @@ def main(argv: List[str] | None = None) -> int:
 
     sub.add_parser(
         "mcp",
+        allow_abbrev=False,
         help="Run deterministic read-only Model Context Protocol (MCP) JSON-RPC 2.0 server over stdio",
     )
 
