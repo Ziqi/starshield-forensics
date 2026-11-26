@@ -6,30 +6,38 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Signed GitHub Release tag whose canonical wheel/sdist will be published"
+        description: "Signed GitHub Release tag to build from source, verify, and publish to PyPI"
         required: false
-        default: "v0.4.0"
+        default: "v0.4.1"
         type: string
 
 permissions:
   contents: read
 
 jobs:
-  verify-and-publish:
+  build-and-verify:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
+      actions: read
+    outputs:
+      release_tag: ${{ steps.gate.outputs.release_tag }}
+      ver: ${{ steps.gate.outputs.ver }}
+      wheel_sha256: ${{ steps.gate.outputs.wheel_sha256 }}
+      sdist_sha256: ${{ steps.gate.outputs.sdist_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag || 'v0.4.1' }}
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Fetch, cryptographically verify & test canonical signed release distributions
+      - name: Verify latest CI status on main, build reproducible distributions, verify pinned Ed25519 signature & test sdist
+        id: gate
         env:
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || 'v0.4.0' }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || 'v0.4.1' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -37,26 +45,58 @@ jobs:
             exit 1
           fi
           VER="${RELEASE_TAG#v}"
+          COMMIT_SHA="$(git rev-parse HEAD)"
+
+          python - "$COMMIT_SHA" <<'PYEOF'
+          import json, os, sys, urllib.request
+          sha = sys.argv[1]
+          url = f"https://api.github.com/repos/Ziqi/starshield-forensics/actions/workflows/ci.yml/runs?head_sha={sha}&status=completed&per_page=10"
+          req = urllib.request.Request(url, headers={
+              "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "starshield-pypi-gate",
+          })
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              runs = json.loads(resp.read().decode("utf-8")).get("workflow_runs", [])
+          eligible = [r for r in runs if r.get("head_sha") == sha and r.get("event") in ("push", "workflow_dispatch")]
+          if not eligible or eligible[0].get("conclusion") != "success":
+              latest = eligible[0].get("conclusion") if eligible else "none"
+              raise SystemExit(f"Refusing PyPI publish for {sha}: latest completed CI run conclusion is {latest!r} (expected 'success')")
+          main_pushes = [r for r in eligible if r.get("event") == "push" and r.get("head_branch") == "main"]
+          if main_pushes and main_pushes[0].get("conclusion") != "success":
+              raise SystemExit(f"Refusing PyPI publish for {sha}: latest push/main CI run conclusion is {main_pushes[0].get('conclusion')!r}")
+          print(f"CI_GATE_OK commit={sha} latest_run_id={eligible[0].get('id')}")
+          PYEOF
+
           BASE_URL="https://github.com/Ziqi/starshield-forensics/releases/download/${RELEASE_TAG}"
           WHL_NAME="starshield_forensics-${VER}-py3-none-any.whl"
           SDIST_NAME="starshield_forensics-${VER}.tar.gz"
 
-          mkdir -p /tmp/release-verify /tmp/sdist-gate dist
+          mkdir -p /tmp/runner-build /tmp/release-verify /tmp/sdist-gate
+          python scripts/build_reproducible.py --all-dists --dist-dir /tmp/runner-build --verify
+          if [[ "${RELEASE_TAG}" == "v0.4.1" ]]; then
+            echo "baa92b331b5e8529f3077e2391d90540d984652d8fd9d49c84775dd33e681620  /tmp/runner-build/starshield.pyz" | sha256sum -c -
+          else
+            echo "Refusing unpinned release tag ${RELEASE_TAG}: update pinned starshield.pyz SHA-256 before publishing" >&2
+            exit 1
+          fi
+
+          echo "3564cabff873e322de8b9da114fe0954f4f8fd69333a999ac0ceefeff81bca04  KEYS.pub" | sha256sum -c -
+          printf '%s\n' '2196305+Ziqi@users.noreply.github.com namespaces="file,git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKz9qGDNELwOsoNnmZIpLKQ+5HOqdE4ilZaTRA/1LR7a' > /tmp/release-verify/pinned_signers.pub
+
           curl -fsSL "${BASE_URL}/SHA256SUMS" -o /tmp/release-verify/SHA256SUMS
           curl -fsSL "${BASE_URL}/SHA256SUMS.sig" -o /tmp/release-verify/SHA256SUMS.sig
-          curl -fsSL "${BASE_URL}/${WHL_NAME}" -o "/tmp/release-verify/${WHL_NAME}"
-          curl -fsSL "${BASE_URL}/${SDIST_NAME}" -o "/tmp/release-verify/${SDIST_NAME}"
 
           ssh-keygen -Y verify \
-            -f KEYS.pub \
+            -f /tmp/release-verify/pinned_signers.pub \
             -I "2196305+Ziqi@users.noreply.github.com" \
             -n file \
             -s /tmp/release-verify/SHA256SUMS.sig < /tmp/release-verify/SHA256SUMS
 
           (
-            cd /tmp/release-verify
-            for req_asset in "${WHL_NAME}" "${SDIST_NAME}"; do
-              line="$(awk -v target="$req_asset" 'length($1) == 64 && $1 ~ /^[0-9a-f]+$/ && ($2 == target || $2 == ("*" target)) && NF == 2 { print; exit }' SHA256SUMS)"
+            cd /tmp/runner-build
+            for req_asset in "starshield.pyz" "${WHL_NAME}" "${SDIST_NAME}"; do
+              line="$(awk -v target="$req_asset" 'length($1) == 64 && $1 ~ /^[0-9a-f]+$/ && ($2 == target || $2 == ("*" target)) && NF == 2 { print; exit }' /tmp/release-verify/SHA256SUMS)"
               if [[ -z "$line" ]]; then
                 echo "Missing required SHA256SUMS entry for ${req_asset}" >&2
                 exit 1
@@ -65,7 +105,7 @@ jobs:
             done
           )
 
-          tar -xzf "/tmp/release-verify/${SDIST_NAME}" -C /tmp/sdist-gate
+          tar -xzf "/tmp/runner-build/${SDIST_NAME}" -C /tmp/sdist-gate
           (
             cd "/tmp/sdist-gate/starshield_forensics-${VER}"
             PYTHONDONTWRITEBYTECODE=1 python -W error -m unittest discover -s tests -v
@@ -75,10 +115,40 @@ jobs:
             PYTHONDONTWRITEBYTECODE=1 python -W error -m unittest discover -s tests -v
           )
 
-          cp "/tmp/release-verify/${WHL_NAME}" "dist/${WHL_NAME}"
-          cp "/tmp/release-verify/${SDIST_NAME}" "dist/${SDIST_NAME}"
+          WHL_SHA="$(sha256sum "/tmp/runner-build/${WHL_NAME}" | awk '{print $1}')"
+          SDIST_SHA="$(sha256sum "/tmp/runner-build/${SDIST_NAME}" | awk '{print $1}')"
+          {
+            echo "release_tag=${RELEASE_TAG}"
+            echo "ver=${VER}"
+            echo "wheel_sha256=${WHL_SHA}"
+            echo "sdist_sha256=${SDIST_SHA}"
+          } >> "$GITHUB_OUTPUT"
+
+  publish-to-pypi:
+    needs: [build-and-verify]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Fetch release distributions and enforce exact runner-built SHA-256 digests (isolated OIDC job)
+        env:
+          RELEASE_TAG: ${{ needs.build-and-verify.outputs.release_tag }}
+          VER: ${{ needs.build-and-verify.outputs.ver }}
+          WHL_SHA: ${{ needs.build-and-verify.outputs.wheel_sha256 }}
+          SDIST_SHA: ${{ needs.build-and-verify.outputs.sdist_sha256 }}
+        run: |
+          set -euo pipefail
+          BASE_URL="https://github.com/Ziqi/starshield-forensics/releases/download/${RELEASE_TAG}"
+          WHL_NAME="starshield_forensics-${VER}-py3-none-any.whl"
+          SDIST_NAME="starshield_forensics-${VER}.tar.gz"
+          mkdir -p dist
+          curl -fsSL "${BASE_URL}/${WHL_NAME}" -o "dist/${WHL_NAME}"
+          curl -fsSL "${BASE_URL}/${SDIST_NAME}" -o "dist/${SDIST_NAME}"
+          printf '%s  %s\n' \
+            "${WHL_SHA}" "dist/${WHL_NAME}" \
+            "${SDIST_SHA}" "dist/${SDIST_NAME}" | sha256sum -c -
           ls -la dist/
-      - name: Publish canonical distributions to PyPI with PEP 740 attestations
+      - name: Publish verified distributions to PyPI with PEP 740 attestations
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: dist/

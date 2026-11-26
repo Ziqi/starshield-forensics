@@ -1098,6 +1098,7 @@ def main(argv: List[str] | None = None) -> int:
             f"completed in {elapsed_ms} ms | "
             f"S1={s1['vectors_tested']} WAL vectors ({s1['valid_records_verified']} valid records, "
             f"100% concordance vs dfindexeddb {df_ver}) | "
+            f"S1B={s1b['vectors_tested']} SSTable/MANIFEST vectors | "
             f"S2={s2['vectors_tested']} PNG/JPEG vectors (100% concordance vs Pillow {pil_ver}) | "
             f"S3={s3['total_vectors_tested']} ISO-7812/13616/9362 specification vectors"
         )
@@ -1108,6 +1109,7 @@ def main(argv: List[str] | None = None) -> int:
             f"Pillow={pil_ver or 'not-installed'}; external cross-tool concordance NOT measured; "
             f"total_vectors={total_vecs}) completed in {elapsed_ms} ms | "
             f"S1={s1['vectors_tested']} WAL vectors (self-check) | "
+            f"S1B={s1b['vectors_tested']} SSTable/MANIFEST vectors | "
             f"S2={s2['vectors_tested']} PNG/JPEG vectors (self-check) | "
             f"S3={s3['total_vectors_tested']} ISO-7812/13616/9362 internal math vectors"
         )

@@ -34,12 +34,13 @@ Epistemic & Evidentiary Scope Note:
 
 from __future__ import annotations
 
+import bisect
 import contextvars
 import hashlib
 import hmac
 import re
 import secrets
-from typing import Any, Dict, Hashable, List
+from typing import Any, Dict, Hashable, List, Tuple
 
 DEFAULT_EPHEMERAL_SALT = secrets.token_bytes(32)
 VALIDATION_SCOPE_NOTE = (
@@ -100,8 +101,20 @@ COMMON_ENGLISH_8LETTER_STOPWORDS = frozenset(
         "PARTNERS", "REGISTER", "DATABASE", "DECISION", "PHYSICAL", "JUDICIAL",
         "DOMESTIC", "TERMINAL", "TRACKING", "ACCOUNTS", "INVOICES", "CONTRACT",
         "MERCHANT", "PURCHASE", "SHIPPING", "APPROVAL", "DISPUTED", "REFUNDED",
-        "BENEFICIARY", "TRANSACTION", "INSTRUCTION", "REMITTANCES", "DECLARATION",
-        "REQUIREMENT", "INDEPENDENT", "ENVIRONMENT",
+        "STERLING", "FINANCES", "SHIPMENT", "REMITTED", "CREDITED", "STANDARD",
+        "DEADLINE", "TIMELINE", "BASELINE", "HANDLING", "SETTLING", "LANDLINE",
+        "PIPELINE", "MAINLAND", "FEBRUARY", "THURSDAY", "BLOCKING", "EXTERNAL",
+        "INTERNAL", "MESSAGES", "RECOVERY", "PROGRESS", "SCHEDULE", "SERVICES",
+        "SOLUTION", "STRATEGY", "OVERVIEW", "ANALYSIS", "INCIDENT", "CANCELED",
+        "RETURNED", "ENCLOSED", "REPORTED", "RECORDED", "REVIEWED", "RESOLVED",
+        "RELEASED", "RETAINED", "ARCHIVED", "EXPORTED", "IMPORTED", "UPLOADED",
+        "PROVIDER", "PROTOCOL", "SOFTWARE", "PRIORITY", "QUESTION", "FEEDBACK",
+        "UPDATING", "PRINTING", "TRAINING", "BUILDING", "STARTING", "STOPPING",
+        "CHANGING", "MATCHING", "ORDERING", "COVERING", "EXCHANGE", "DIRECTOR",
+        "TREASURY", "ATTORNEY", "TRIBUNAL", "CLAIMANT", "REDACTED", "SNAPSHOT",
+        "METADATA", "VALIDATE", "CHECKSUM",
+        "BENEFICIARY", "TRANSACTION", "INSTRUCTION", "REMITTANCES",
+        "DECLARATION", "REQUIREMENT", "INDEPENDENT", "ENVIRONMENT",
     }
 )
 
@@ -366,19 +379,84 @@ def mask_identifier(val: str, salt: bytes | None = None, digest_alg: str | None 
     return f"[REDACTED_HMAC:{digest}]"
 
 
-_CARD_RE = re.compile(r"(?<![0-9])(?:4[0-9]|5[1-5]|62)(?:[\s-]?[0-9]){11,17}(?![0-9])")
-_IBAN_RE = re.compile(r"\b[A-Z]{2}[0-9]{2}(?:[ \t\u00a0\u202f\u2009\u2007-]?[A-Z0-9]){11,30}\b", re.ASCII)
-_UK_SORT_RE = re.compile(r"(?<![0-9])[0-9]{2}-[0-9]{2}-[0-9]{2}(?![0-9])")
+_CARD_RE = re.compile(r"(?<![0-9])(?:4[0-9]|5[1-5]|62)(?:[ \t-]?[0-9]){11,17}(?![0-9])")
+_CARD_IIN_START_RE = re.compile(r"^(?:4[0-9]|5[1-5]|62)", re.ASCII)
+_IBAN_HEAD_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z]{2})([0-9]{2})(?=[A-Za-z0-9 \t\u00a0\u202f\u2009\u2007-])",
+    re.ASCII,
+)
+_ALNUM_TOK_RE = re.compile(r"[A-Za-z0-9]{1,36}", re.ASCII)
+_NEXT_HORIZ_TOK_RE = re.compile(
+    r"(?:[ \t\u00a0\u202f\u2009\u2007]+|-)(?=[A-Za-z0-9])([A-Za-z0-9]{1,36})",
+    re.ASCII,
+)
+_UK_SORT_HYPHEN_RE = re.compile(r"(?<![0-9-])[0-9]{2}-[0-9]{2}-[0-9]{2}(?![0-9-])")
+_UK_SORT_CTX_RE = re.compile(
+    r"\b(?:sort[ \t-]*code|s/c)[ \t:=#-]*([0-9]{2})[ \t-]?([0-9]{2})[ \t-]?([0-9]{2})(?![0-9-])",
+    re.IGNORECASE | re.ASCII,
+)
 _UK_ACC_RE = re.compile(r"(?<![0-9])[0-9]{8}(?![0-9])")
+_NON_ACCOUNT_PREFIX_RE = re.compile(
+    r"\b(?:order|invoice|inv|ref|reference|ticket|case|phone|tel|date|po|id|item)"
+    r"(?:[ \t]+(?:no\.?|number|id|code))?[ \t:=#-]*$",
+    re.IGNORECASE | re.ASCII,
+)
 _SWIFT_CTX_RE = re.compile(r"\b(?:swift|bic|routing|wire|beneficiary|iban)\b", re.IGNORECASE | re.ASCII)
+_SWIFT_ALPHA8_CTX_RE = re.compile(r"\b(?:swift|bic)\b", re.IGNORECASE | re.ASCII)
 _BIC_RE = re.compile(r"\b([A-Z]{4})([A-Z]{2})([A-Z0-9]{2})([A-Z0-9]{3})?\b", re.ASCII)
+_BIC_EXPLICIT_CI_RE = re.compile(
+    r"\b(?:(?:swift|bic)[ \t]+code[ \t:=#-]+|(?:swift|bic)[ \t]*[:=#-][ \t]*)"
+    r"([A-Za-z]{4})([A-Za-z]{2})([A-Za-z0-9]{2})([A-Za-z0-9]{3})?\b",
+    re.IGNORECASE | re.ASCII,
+)
 _ABA_RE = re.compile(r"(?<![0-9])([0-9]{9})(?![0-9])")
 _ABA_CTX_RE = re.compile(r"\b(?:aba|routing|rtn|ach|fedwire|wire|transit)\b", re.IGNORECASE | re.ASCII)
-_RF_RE = re.compile(r"\bRF[0-9]{2}(?:[ \t\u00a0\u202f\u2009\u2007-]?[A-Z0-9]){1,21}\b", re.ASCII)
-_LEI_RE = re.compile(r"\b([0-9A-Z]{18}[0-9]{2})\b", re.ASCII)
+_RF_HEAD_RE = re.compile(
+    r"(?<![A-Za-z0-9])[Rr][Ff][0-9]{2}(?=[A-Za-z0-9 \t\u00a0\u202f\u2009\u2007-])",
+    re.ASCII,
+)
+_RF_TRAILING_STOPWORDS = frozenset(
+    {
+        "DUE", "ON", "BY", "FOR", "TO", "AT", "IN", "OF", "AND", "OR", "INV",
+        "INVOICE", "REF", "REFERENCE", "DATED", "DATE", "PAY", "PAID", "AMOUNT",
+        "TOTAL", "EUR", "GBP", "USD", "CHF", "SEK", "NOK", "DKK", "PLN", "ASAP",
+        "THANKS", "THANK", "PLEASE", "REGARDS", "FROM", "VIA",
+    }
+)
+_LEI_RE = re.compile(r"\b([0-9A-Za-z]{18}[0-9]{2})\b", re.ASCII)
 _LEI_CTX_RE = re.compile(r"\b(?:lei|legal\s+entity)\b", re.IGNORECASE | re.ASCII)
 _TRON_RE = re.compile(r"\b(T[1-9A-HJ-NP-Za-km-z]{33})\b", re.ASCII)
 _ETH_RE = re.compile(r"\b(0x[0-9a-fA-F]{40})\b", re.ASCII)
+
+
+def _merge_spans(spans: List[Tuple[int, int]]) -> Tuple[List[int], List[int]]:
+    if not spans:
+        return [], []
+    ordered = sorted(spans)
+    m_starts: List[int] = [ordered[0][0]]
+    m_ends: List[int] = [ordered[0][1]]
+    for lo, hi in ordered[1:]:
+        if lo <= m_ends[-1]:
+            if hi > m_ends[-1]:
+                m_ends[-1] = hi
+        else:
+            m_starts.append(lo)
+            m_ends.append(hi)
+    return m_starts, m_ends
+
+
+def _span_covered(starts: List[int], ends: List[int], lo: int, hi: int) -> bool:
+    if not starts:
+        return False
+    idx = bisect.bisect_right(starts, lo) - 1
+    return idx >= 0 and hi <= ends[idx]
+
+
+def _span_overlaps(starts: List[int], ends: List[int], lo: int, hi: int) -> bool:
+    if not starts:
+        return False
+    idx = bisect.bisect_left(ends, lo + 1)
+    return idx < len(starts) and starts[idx] < hi
 
 
 def extract_validated_iocs(
@@ -401,50 +479,159 @@ def extract_validated_iocs(
     def fmt(s: str) -> str:
         return mask_identifier(s, salt=salt) if redact else s
 
-    # 1. ISO/IEC 7812 payment cards (major network IIN ranges 4/5/62) allowing spaces or hyphens
-    for m in _CARD_RE.finditer(text):
-        digits = re.sub(r"[\s-]", "", m.group(0))
-        if not digits.isascii() or not (13 <= len(digits) <= 19):
+    claimed_spans: List[Tuple[int, int]] = []
+    text_len = len(text)
+
+    # 1. IBAN (strictly O(N) cursor scan with O(1) 64-char lookahead window + ISO 13616 Mod-97)
+    iban_pos = 0
+    while iban_pos < text_len:
+        m_ib = _IBAN_HEAD_RE.search(text, iban_pos)
+        if m_ib is None:
+            break
+        cc = m_ib.group(1).upper()
+        exp_len = IBAN_LENGTHS.get(cc)
+        if exp_len is None:
+            iban_pos = m_ib.end()
             continue
-        rendered = fmt(digits)
-        if luhn_valid(digits):
-            add_unique("luhn_validated_cards", rendered)
+        ib_end_cap = min(text_len, m_ib.start() + 64)
+        t0_m = _ALNUM_TOK_RE.match(text, m_ib.start(), ib_end_cap)
+        if t0_m is None:
+            iban_pos = m_ib.end()
+            continue
+        acc_parts = [t0_m.group(0).upper()]
+        acc_len = len(acc_parts[0])
+        cur_end = t0_m.end()
+        while acc_len < exp_len:
+            nxt_m = _NEXT_HORIZ_TOK_RE.match(text, cur_end, ib_end_cap)
+            if nxt_m is None:
+                break
+            nxt_clean = nxt_m.group(1).upper()
+            if acc_len + len(nxt_clean) > exp_len:
+                break
+            acc_parts.append(nxt_clean)
+            acc_len += len(nxt_clean)
+            cur_end = nxt_m.end()
+        if acc_len == exp_len and (cur_end == text_len or not text[cur_end].isalnum()):
+            cand = "".join(acc_parts)
+            if iban_mod97_valid(cand):
+                add_unique("mod97_validated_ibans", fmt(cand))
+                claimed_spans.append((m_ib.start(), cur_end))
+                iban_pos = cur_end
+                continue
+        iban_pos = m_ib.end()
+
+    # 2. ISO 11649 Creditor Reference (strictly O(N) cursor scan with O(1) 48-char lookahead + Mod-97)
+    rf_pos = 0
+    while rf_pos < text_len:
+        rf_m = _RF_HEAD_RE.search(text, rf_pos)
+        if rf_m is None:
+            break
+        rf_end_cap = min(text_len, rf_m.start() + 48)
+        rf_t0 = _ALNUM_TOK_RE.match(text, rf_m.start(), rf_end_cap)
+        if rf_t0 is None:
+            rf_pos = rf_m.end()
+            continue
+        raw_t0 = rf_t0.group(0)
+        clean_t0 = raw_t0.upper()
+        if len(clean_t0) >= 5:
+            if (
+                len(clean_t0) <= 25
+                and (rf_t0.end() == text_len or not text[rf_t0.end()].isalnum())
+                and iso11649_creditor_ref_valid(clean_t0)
+            ):
+                add_unique("iso11649_creditor_references", fmt(clean_t0))
+                claimed_spans.append((rf_m.start(), rf_t0.end()))
+                rf_pos = rf_t0.end()
+            else:
+                rf_pos = rf_m.end()
+            continue
+
+        # Space- or hyphen-grouped ISO 11649 blocks (`RFdd XXXX XXXX ... X{1,4}`)
+        head_is_upper = raw_t0[:2].isupper()
+        rf_parts = [clean_t0]
+        rf_len = len(clean_t0)
+        rf_cur_end = rf_t0.end()
+        best_rf: Tuple[str, int] | None = None
+        while rf_len < 25:
+            nxt_rf = _NEXT_HORIZ_TOK_RE.match(text, rf_cur_end, rf_end_cap)
+            if nxt_rf is None:
+                break
+            clean_grp = nxt_rf.group(1)
+            upper_grp = clean_grp.upper()
+            if (
+                not clean_grp
+                or len(clean_grp) > 4
+                or rf_len + len(clean_grp) > 25
+                or upper_grp in _RF_TRAILING_STOPWORDS
+                or (head_is_upper and clean_grp.isalpha() and clean_grp.islower())
+                or (
+                    best_rf is not None
+                    and len(clean_grp) == 4
+                    and upper_grp.startswith("RF")
+                    and clean_grp[2:].isdigit()
+                )
+            ):
+                break
+            rf_parts.append(upper_grp)
+            rf_len += len(upper_grp)
+            rf_cur_end = nxt_rf.end()
+            if rf_cur_end < text_len and text[rf_cur_end].isalnum():
+                break
+            cand_rf = "".join(rf_parts)
+            if iso11649_creditor_ref_valid(cand_rf):
+                best_rf = (cand_rf, rf_cur_end)
+            if len(clean_grp) < 4:
+                break
+        if best_rf is not None:
+            add_unique("iso11649_creditor_references", fmt(best_rf[0]))
+            claimed_spans.append((rf_m.start(), best_rf[1]))
+            rf_pos = best_rf[1]
         else:
-            add_unique("unvalidated_card_candidates", rendered)
+            rf_pos = rf_m.end()
 
-    # 2. IBAN (unambiguous O(N) linear scan + ISO 13616 Mod-97 & registered country length 15..34)
-    for m in _IBAN_RE.finditer(text):
-        raw_match = m.group(0)
-        cand = re.sub(r"[\s-]+", "", raw_match)
-        if iban_mod97_valid(cand):
-            add_unique("mod97_validated_ibans", fmt(cand))
-        elif any(ch.isspace() for ch in raw_match):
-            # Handle IBAN followed across whitespace/newline by an uppercase token (e.g. "GB82...32\nSWIFT")
-            exp_len = IBAN_LENGTHS.get(cand[:2])
-            if exp_len is not None and len(cand) > exp_len:
-                acc_tokens: List[str] = []
-                acc_len = 0
-                for tok in raw_match.split():
-                    cleaned_tok = tok.replace("-", "")
-                    if acc_len + len(cleaned_tok) > exp_len:
-                        break
-                    acc_tokens.append(cleaned_tok)
-                    acc_len += len(cleaned_tok)
-                    if acc_len == exp_len:
-                        prefix_cand = "".join(acc_tokens)
-                        if iban_mod97_valid(prefix_cand):
-                            add_unique("mod97_validated_ibans", fmt(prefix_cand))
-                        break
+    c_starts, c_ends = _merge_spans(claimed_spans)
 
-    # 3. UK Sort Code + local-window (<=120 chars) 8-digit Account Number pairing (intra-message only)
-    for sc_match in _UK_SORT_RE.finditer(text):
-        sc = sc_match.group(0)
-        win_start = max(0, sc_match.start() - 120)
-        win_end = min(len(text), sc_match.end() + 120)
-        window = text[win_start:win_end]
-        acc_matches = _UK_ACC_RE.findall(window)
-        if acc_matches:
-            for acc in acc_matches:
+    # 3. UK Sort Code (`20-00-00` + labeled `sort code 40 47 84` / `404784`) + 8-digit Account pairing
+    #    Evaluated BEFORE payment cards so 6+8=14-digit UK bank details are never misclassified as cards.
+    raw_sort_hits: List[Tuple[int, int, str]] = []
+    for hm in _UK_SORT_HYPHEN_RE.finditer(text):
+        if not _span_overlaps(c_starts, c_ends, hm.start(), hm.end()):
+            raw_sort_hits.append((hm.start(), hm.end(), hm.group(0)))
+    for cm in _UK_SORT_CTX_RE.finditer(text):
+        sc_start, sc_end = cm.start(1), cm.end(3)
+        if not _span_overlaps(c_starts, c_ends, sc_start, sc_end):
+            raw_sort_hits.append((sc_start, sc_end, f"{cm.group(1)}-{cm.group(2)}-{cm.group(3)}"))
+    raw_sort_hits.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+
+    sort_hits: List[Tuple[int, int, str]] = []
+    for s_lo, s_hi, sc_fmt in raw_sort_hits:
+        if not sort_hits or s_lo >= sort_hits[-1][1]:
+            sort_hits.append((s_lo, s_hi, sc_fmt))
+
+    uk_claimed: List[Tuple[int, int]] = [(s_lo, s_hi) for s_lo, s_hi, _ in sort_hits]
+    sort_starts, sort_ends = _merge_spans(uk_claimed)
+
+    for idx_s, (s_lo, s_hi, sc) in enumerate(sort_hits):
+        win_start = max(0, s_lo - 120)
+        win_end = min(text_len, s_hi + 120)
+        if idx_s > 0:
+            win_start = max(win_start, sort_hits[idx_s - 1][1])
+        if idx_s + 1 < len(sort_hits):
+            win_end = min(win_end, sort_hits[idx_s + 1][0])
+
+        paired_accs: List[str] = []
+        for acc_m in _UK_ACC_RE.finditer(text, win_start, win_end):
+            a_lo, a_hi = acc_m.start(), acc_m.end()
+            if _span_overlaps(c_starts, c_ends, a_lo, a_hi) or _span_overlaps(sort_starts, sort_ends, a_lo, a_hi):
+                continue
+            prefix_ctx = text[max(0, a_lo - 32) : a_lo]
+            if _NON_ACCOUNT_PREFIX_RE.search(prefix_ctx):
+                continue
+            paired_accs.append(acc_m.group(0))
+            uk_claimed.append((a_lo, a_hi))
+
+        if paired_accs:
+            for acc in paired_accs:
                 pair = {
                     "sort_code": fmt(sc),
                     "account_number": fmt(acc),
@@ -454,50 +641,105 @@ def extract_validated_iocs(
         else:
             add_unique("unpaired_uk_sort_codes", fmt(sc))
 
-    # 4. SWIFT / BIC (ISO 9362): valid ISO 3166 country at [4:6] + stopword rejection + local +/-120-char context
+    if uk_claimed:
+        claimed_spans.extend(uk_claimed)
+        c_starts, c_ends = _merge_spans(claimed_spans)
+
+    # 4. ISO/IEC 7812 payment cards scanned over unclaimed text slices (preserving cards adjacent to IBAN/dates)
+    unclaimed_segs: List[Tuple[int, int]] = []
+    prev_end = 0
+    for c_lo, c_hi in zip(c_starts, c_ends, strict=False):
+        if prev_end < c_lo:
+            unclaimed_segs.append((prev_end, c_lo))
+        prev_end = max(prev_end, c_hi)
+    if prev_end < text_len:
+        unclaimed_segs.append((prev_end, text_len))
+
+    card_claimed: List[Tuple[int, int]] = []
+    for seg_lo, seg_hi in unclaimed_segs:
+        for m in _CARD_RE.finditer(text, seg_lo, seg_hi):
+            raw_card = m.group(0)
+            digits = re.sub(r"[ \t-]", "", raw_card)
+            if not digits.isascii() or not (13 <= len(digits) <= 19):
+                continue
+            if luhn_valid(digits):
+                add_unique("luhn_validated_cards", fmt(digits))
+                card_claimed.append((m.start(), m.end()))
+                continue
+
+            # Recover longest valid 13..19-digit token-aligned sub-window (handles leading qty or trailing expiry/CVV)
+            recovered_sub = ""
+            if " " in raw_card or "\t" in raw_card:
+                ws_parts = [p.replace("-", "") for p in re.split(r"[ \t]+", raw_card) if p]
+                best_len = 0
+                for s_idx in range(len(ws_parts)):
+                    if not _CARD_IIN_START_RE.match(ws_parts[s_idx]):
+                        continue
+                    for e_idx in range(len(ws_parts), s_idx, -1):
+                        if s_idx == 0 and e_idx == len(ws_parts):
+                            continue
+                        sub_cand = "".join(ws_parts[s_idx:e_idx])
+                        if 13 <= len(sub_cand) <= 19 and len(sub_cand) > best_len and luhn_valid(sub_cand):
+                            recovered_sub = sub_cand
+                            best_len = len(sub_cand)
+                            break
+            if recovered_sub:
+                add_unique("luhn_validated_cards", fmt(recovered_sub))
+                card_claimed.append((m.start(), m.end()))
+            else:
+                add_unique("unvalidated_card_candidates", fmt(digits))
+
+    if card_claimed:
+        claimed_spans.extend(card_claimed)
+        c_starts, c_ends = _merge_spans(claimed_spans)
+
+    # 5. SWIFT / BIC (ISO 9362): valid ISO 3166 country at [4:6] + stopword rejection + context gates
     for bic_m in _BIC_RE.finditer(text):
+        if _span_covered(c_starts, c_ends, bic_m.start(), bic_m.end()):
+            continue
         full_bic = bic_m.group(0)
         country = bic_m.group(2)
-        if country not in ISO_3166_ALPHA2:
+        if country not in ISO_3166_ALPHA2 or full_bic in COMMON_ENGLISH_8LETTER_STOPWORDS:
             continue
-        if full_bic in COMMON_ENGLISH_8LETTER_STOPWORDS:
-            continue
-        if full_bic.isalpha():
-            bic_win = text[max(0, bic_m.start() - 120) : min(len(text), bic_m.end() + 120)]
+        bic_win = text[max(0, bic_m.start() - 120) : min(text_len, bic_m.end() + 120)]
+        if len(full_bic) == 8 and full_bic.isalpha():
+            if not _SWIFT_ALPHA8_CTX_RE.search(bic_win):
+                continue
+        elif len(full_bic) == 8:
             if not _SWIFT_CTX_RE.search(bic_win):
                 continue
         if len(full_bic) in (8, 11):
             add_unique("validated_swift_bics", fmt(full_bic))
 
-    # 5. US ABA Routing Number (9 digits, 3-7-1 mod 10, +/-80-char banking context window)
+    for lbic_m in _BIC_EXPLICIT_CI_RE.finditer(text):
+        if _span_covered(c_starts, c_ends, lbic_m.start(1), lbic_m.end()):
+            continue
+        raw_code = "".join(g for g in lbic_m.groups() if g).upper()
+        country = lbic_m.group(2).upper()
+        if (
+            len(raw_code) in (8, 11)
+            and country in ISO_3166_ALPHA2
+            and raw_code not in COMMON_ENGLISH_8LETTER_STOPWORDS
+        ):
+            add_unique("validated_swift_bics", fmt(raw_code))
+
+    # 6. US ABA Routing Number (9 digits, 3-7-1 mod 10, +/-80-char banking context window)
     for aba_m in _ABA_RE.finditer(text):
+        if _span_covered(c_starts, c_ends, aba_m.start(), aba_m.end()):
+            continue
         cand_aba = aba_m.group(1)
-        win = text[max(0, aba_m.start() - 80) : min(len(text), aba_m.end() + 80)]
+        win = text[max(0, aba_m.start() - 80) : min(text_len, aba_m.end() + 80)]
         if _ABA_CTX_RE.search(win) and aba_routing_valid(cand_aba):
             add_unique("aba_validated_routing_numbers", fmt(cand_aba))
 
-    # 6. ISO 11649 Creditor Reference (RFxx..., mod 97 == 1, arbitrary valid whitespace/hyphen groupings)
-    for rf_m in _RF_RE.finditer(text):
-        raw_rf = rf_m.group(0)
-        cand_rf = re.sub(r"[\s-]+", "", raw_rf).upper()
-        if iso11649_creditor_ref_valid(cand_rf):
-            add_unique("iso11649_creditor_references", fmt(cand_rf))
-        elif any(ch.isspace() for ch in raw_rf):
-            # Trim trailing uppercase alpha words (e.g. "RF18 5390 0754 7034\nUSD") without dropping numeric groups
-            parts = raw_rf.split()
-            while len(parts) > 1 and parts[-1].isalpha():
-                parts.pop()
-                trimmed_rf = re.sub(r"[\s-]+", "", "".join(parts)).upper()
-                if iso11649_creditor_ref_valid(trimmed_rf):
-                    add_unique("iso11649_creditor_references", fmt(trimmed_rf))
-                    break
-
-    # 7. ISO 17442 LEI (20 chars, mod 97 == 1 + numeric LOU or explicit LEI context)
+    # 7. ISO 17442 LEI (20 chars, mod 97 == 1 + numeric LOU or explicit LEI context, case-insensitive)
     for lei_m in _LEI_RE.finditer(text):
-        cand_lei = lei_m.group(1)
-        win = text[max(0, lei_m.start() - 80) : min(len(text), lei_m.end() + 80)]
+        if _span_covered(c_starts, c_ends, lei_m.start(), lei_m.end()):
+            continue
+        cand_lei = lei_m.group(1).upper()
+        win = text[max(0, lei_m.start() - 80) : min(text_len, lei_m.end() + 80)]
         has_lei_ctx = bool(_LEI_CTX_RE.search(win))
-        if cand_lei[:4].isdigit() or has_lei_ctx:
+        if (cand_lei[:4].isdigit() and any(ch.isalpha() for ch in cand_lei[4:18])) or has_lei_ctx:
             if lei_iso17442_valid(cand_lei):
                 add_unique("validated_leis", fmt(cand_lei))
 

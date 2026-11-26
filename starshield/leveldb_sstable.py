@@ -19,11 +19,13 @@ Implements official LevelDB table and manifest binary formats using Python >=3.1
 - Sequential multi-record `MANIFEST-*` `VersionEdit` state-machine replay separating active
   compaction levels from unreferenced orphan `.ldb` tables still residing on disk.
 - Store-wide reconciliation across `.log` WAL + active `.ldb` + orphan `.ldb` classifying
-  records as `LIVE_ACTIVE`, `UI_SOFT_DELETED`, or `TOMBSTONED_HISTORICAL_RECOVERED`.
+  records as `LIVE_ACTIVE`, `UI_SOFT_DELETED`, `LIVENESS_INDETERMINATE`, or
+  `TOMBSTONED_HISTORICAL_RECOVERED`.
 
 Scope & Honest Limitations:
 - Decodes JSON slices (`chatsvc`, `slack_web`, `web_messenger`, `b2b_portal_json`, `generic_json`)
-  and lightweight printable UTF-8 / UTF-16LE LocalStorage key-value text (in `generic-json` mode).
+  and lightweight printable UTF-8 / UTF-16LE LocalStorage key-value text (for Chromium DOMStorage
+  keys in `auto` mode and arbitrary keys in `generic-json` mode).
 - Does NOT implement full binary Blink V8 `StructuredClone` AST deserialization, decompress
   Zstandard (`0x02`) blocks, reconstruct externalized IndexedDB `.blob` files, or parse SQLite.
 """
@@ -32,7 +34,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import stat
 import struct
 from pathlib import Path
@@ -45,11 +46,16 @@ from starshield.leveldb_log import (
     MAX_PRECHECK_SCAN_FILES,
     VALID_SCHEMA_MODES,
     SafeDiagnosticError,
+    _MANIFEST_NAME_RE,
+    _decode_chromium_string_prefixed as _decode_chromium_string_prefixed,
     _extract_json_objects_from_bytes,
+    _extract_lightweight_kv_record,
     _has_sqlite3_magic,
+    _is_chromium_domstorage_key,
     crc32c,
     decode_varint,
     encode_varint,
+    is_blink_v8_serialized_value,
     iter_leveldb_logical_records,
     mask_crc32c,
     normalize_carved_record_fields,
@@ -70,8 +76,11 @@ MAX_STORE_MATERIALIZED_BYTES = 128 * 1024 * 1024  # 128 MiB cumulative materiali
 PER_OP_OVERHEAD_BYTES = 256  # CPython dict/tuple/int heap overhead charged per parsed KV/tombstone op
 MAX_BLOCK_ENTRIES = 65536  # Max entries per single SSTable block
 MAX_STORE_RAW_OPS = 250000  # Store-wide raw KV/tombstone operation ceiling
+MAX_STORE_RECOVERED_RECORDS = 25000  # Store-wide materialized output record ceiling
+MAX_OBJECTS_PER_LEVELDB_VALUE = 256  # Max JSON objects carved from a single LevelDB KV value
+MAX_GLOBAL_STORE_UNCOMPRESSED_BYTES = 256 * 1024 * 1024  # Global Snappy ceiling across all sub-stores
 MAX_RESTARTS_PER_BLOCK = 262144
-MAX_KV_TEXT_CHARS = 512
+MAX_SUBSTORES_RECONCILED = 256
 
 _SOURCE_RANK = {
     "sstable": 2,
@@ -83,15 +92,15 @@ _SOURCE_RANK = {
 
 def make_store_budget(
     *,
-    snappy_bytes: int = MAX_STORE_TOTAL_UNCOMPRESSED_BYTES,
-    materialized_bytes: int = MAX_STORE_MATERIALIZED_BYTES,
-    max_ops: int = MAX_STORE_RAW_OPS,
+    snappy_bytes: int | None = None,
+    materialized_bytes: int | None = None,
+    max_ops: int | None = None,
 ) -> Dict[str, int]:
     """Create a fresh store-wide decompression, materialized-memory, and op-count budget dictionary."""
     return {
-        "remaining": snappy_bytes,
-        "materialized_remaining": materialized_bytes,
-        "ops_remaining": max_ops,
+        "remaining": MAX_STORE_TOTAL_UNCOMPRESSED_BYTES if snappy_bytes is None else snappy_bytes,
+        "materialized_remaining": MAX_STORE_MATERIALIZED_BYTES if materialized_bytes is None else materialized_bytes,
+        "ops_remaining": MAX_STORE_RAW_OPS if max_ops is None else max_ops,
     }
 
 # VersionEdit tags from LevelDB db/version_edit.cc
@@ -104,8 +113,6 @@ _VE_DELETED_FILE = 6
 _VE_NEW_FILE = 7
 _VE_PREV_LOG_NUMBER = 9
 
-_MANIFEST_NAME_RE = re.compile(r"^MANIFEST-([0-9]+)$", re.IGNORECASE)
-_PRINTABLE_CTRL_OK = frozenset({9, 10, 13})
 KNOWN_SAFE_MANIFEST_COMPARATORS = frozenset({"leveldb.BytewiseComparator", "idb_cmp1"})
 
 
@@ -516,7 +523,8 @@ def _iter_sstable_block_entries(
             mat_rem = budget_state.get("materialized_remaining", MAX_STORE_MATERIALIZED_BYTES)
             if entry_cost > mat_rem:
                 raise BufferError(
-                    "Cumulative LevelDB materialized key/value bytes exceeded 128 MiB store safety budget"
+                    f"Cumulative LevelDB materialized key/value bytes exceeded "
+                    f"{MAX_STORE_MATERIALIZED_BYTES // (1024 * 1024)} MiB store safety budget"
                 )
             budget_state["ops_remaining"] = ops_rem - 1
             budget_state["materialized_remaining"] = mat_rem - entry_cost
@@ -587,7 +595,8 @@ def _read_and_verify_sstable_block(
             return (
                 "budget_exceeded",
                 b"",
-                "Cumulative Snappy decompression exceeded 64 MiB store safety budget",
+                f"Cumulative Snappy decompression exceeded "
+                f"{MAX_STORE_TOTAL_UNCOMPRESSED_BYTES // (1024 * 1024)} MiB store safety budget",
             )
         try:
             unpacked = decompress_snappy(block_slice, max_uncompressed_bytes=declared_len)
@@ -604,77 +613,6 @@ def _read_and_verify_sstable_block(
     return "corrupt", b"", f"Unknown SSTable block compression type 0x{ctype:02x}"
 
 
-def _decode_chromium_string_prefixed(buf: bytes) -> str | None:
-    """
-    Decode Chromium LocalStorage / DOMStorage value or key segment (`\\x01` UTF-8/Latin-1,
-    `\\x00` UTF-16LE, or clean printable UTF-8) while rejecting binary Blink V8 `0xFF` blobs.
-    """
-    if not buf:
-        return None
-    if buf[0] == 0xFF or (len(buf) >= 2 and buf[0] == 0x00 and buf[1] == 0xFF):
-        return None
-
-    cand: str | None = None
-    if buf[0] == 0x01 and len(buf) > 1:
-        try:
-            cand = buf[1:].decode("utf-8")
-        except UnicodeDecodeError:
-            cand = buf[1:].decode("latin-1")
-    elif buf[0] == 0x00 and len(buf) >= 3 and (len(buf) - 1) % 2 == 0:
-        try:
-            cand = buf[1:].decode("utf-16-le")
-        except UnicodeDecodeError:
-            cand = None
-    else:
-        try:
-            cand = buf.decode("utf-8")
-        except UnicodeDecodeError:
-            cand = None
-
-    if not cand:
-        return None
-    cleaned = sanitize_utf8_str(cand).strip("\x00 \t\r\n")
-    if len(cleaned) < 2:
-        return None
-    printable = sum(1 for ch in cleaned if ch.isprintable() or ord(ch) in _PRINTABLE_CTRL_OK)
-    if printable / len(cleaned) < 0.85:
-        return None
-    return cleaned[:MAX_KV_TEXT_CHARS]
-
-
-def _extract_lightweight_kv_record(user_key: bytes, val_bytes: bytes) -> Dict[str, Any] | None:
-    """
-    Lightweight non-V8-AST key-value string extractor for `generic-json` mode (covering Chromium
-    LocalStorage `_<origin>\\x00\\x01<key>` and Electron/LevelDB plaintext KV entries).
-    """
-    val_txt = _decode_chromium_string_prefixed(val_bytes)
-    if not val_txt:
-        return None
-
-    origin_str = ""
-    key_label = ""
-    if user_key.startswith(b"_") and b"\x00" in user_key[1:]:
-        sep = user_key.index(b"\x00", 1)
-        origin_raw = user_key[1:sep]
-        rest_key = user_key[sep + 1 :]
-        origin_str = origin_raw.decode("utf-8", errors="ignore").strip()
-        key_label = _decode_chromium_string_prefixed(rest_key) or rest_key.decode("utf-8", errors="ignore").strip()
-    else:
-        key_label = _decode_chromium_string_prefixed(user_key) or ""
-
-    if not key_label:
-        key_label = f"key_{hashlib.sha256(user_key).hexdigest()[:12]}"
-
-    return {
-        "message_id": key_label[:128],
-        "sender_mri": origin_str[:128],
-        "composetime": None,
-        "deletetime": None,
-        "edittime": None,
-        "cached_content": f"{key_label}: {val_txt}" if key_label else val_txt,
-    }
-
-
 def parse_leveldb_sstable(
     raw_bytes: bytes,
     schema_mode: str = "auto",
@@ -684,6 +622,7 @@ def parse_leveldb_sstable(
     source_name: str = "000001.ldb",
     sstable_level: int | None = None,
     is_orphan: bool = False,
+    probe_generic_fallback: bool = False,
 ) -> Dict[str, Any]:
     """
     Parse a single LevelDB `.ldb` / `.sst` SSTable file, verifying Footer magic, Index Block,
@@ -709,47 +648,39 @@ def parse_leveldb_sstable(
         if len(corrupted_blocks) < MAX_CORRUPTED_RECORDS_REPORTED:
             corrupted_blocks.append({"byte_offset": offset, "reason": reason})
 
-    if total_len < SSTABLE_FOOTER_SIZE:
-        add_corrupt(0, f"File shorter than 48-byte LevelDB SSTable footer ({total_len} bytes)")
-        return {
+    def _early_sst_result(*, valid_footer: bool, zstd_cnt: int = 0, b_exceeded: bool = False) -> Dict[str, Any]:
+        early_res: Dict[str, Any] = {
             "parser": f"leveldb_sstable_crc32c_snappy_v{__version__}",
-            "valid_sstable_footer": False,
+            "valid_sstable_footer": valid_footer,
             "file_size_bytes": total_len,
             "data_blocks_verified": 0,
             "snappy_blocks_decompressed": 0,
             "uncompressed_blocks_read": 0,
-            "zstd_unsupported_blocks_count": 0,
+            "zstd_unsupported_blocks_count": zstd_cnt,
+            "budget_exceeded": b_exceeded,
             "corrupted_blocks_count": corrupted_count,
-            "corrupted_blocks_truncated": False,
+            "corrupted_blocks_truncated": corrupted_count > MAX_CORRUPTED_RECORDS_REPORTED,
             "corrupted_blocks": corrupted_blocks,
             "value_entries_seen": 0,
             "tombstone_entries_seen": 0,
             "blink_v8_non_json_values_skipped": 0,
             "recovered_records_count": 0,
+            "recovered_records_truncated": False,
             "recovered_records": [],
         }
+        if probe_generic_fallback:
+            early_res["generic_fallback_records_count"] = 0
+        return early_res
+
+    if total_len < SSTABLE_FOOTER_SIZE:
+        add_corrupt(0, f"File shorter than 48-byte LevelDB SSTable footer ({total_len} bytes)")
+        return _early_sst_result(valid_footer=False)
 
     footer_off = total_len - SSTABLE_FOOTER_SIZE
     footer = raw_bytes[footer_off:]
     if footer[40:48] != LEVELDB_SSTABLE_MAGIC_LE:
         add_corrupt(footer_off + 40, "Missing 8-byte LevelDB SSTable footer magic (0xdb4775248b80fb57)")
-        return {
-            "parser": f"leveldb_sstable_crc32c_snappy_v{__version__}",
-            "valid_sstable_footer": False,
-            "file_size_bytes": total_len,
-            "data_blocks_verified": 0,
-            "snappy_blocks_decompressed": 0,
-            "uncompressed_blocks_read": 0,
-            "zstd_unsupported_blocks_count": 0,
-            "corrupted_blocks_count": corrupted_count,
-            "corrupted_blocks_truncated": False,
-            "corrupted_blocks": corrupted_blocks,
-            "value_entries_seen": 0,
-            "tombstone_entries_seen": 0,
-            "blink_v8_non_json_values_skipped": 0,
-            "recovered_records_count": 0,
-            "recovered_records": [],
-        }
+        return _early_sst_result(valid_footer=False)
 
     try:
         p = 0
@@ -764,26 +695,11 @@ def parse_leveldb_sstable(
             raise ValueError("Footer metaindex/index BlockHandle exceeds SSTable payload bounds")
     except ValueError as exc:
         add_corrupt(footer_off, f"Malformed SSTable footer BlockHandles: {exc}")
-        return {
-            "parser": f"leveldb_sstable_crc32c_snappy_v{__version__}",
-            "valid_sstable_footer": True,
-            "file_size_bytes": total_len,
-            "data_blocks_verified": 0,
-            "snappy_blocks_decompressed": 0,
-            "uncompressed_blocks_read": 0,
-            "zstd_unsupported_blocks_count": 0,
-            "corrupted_blocks_count": corrupted_count,
-            "corrupted_blocks_truncated": False,
-            "corrupted_blocks": corrupted_blocks,
-            "value_entries_seen": 0,
-            "tombstone_entries_seen": 0,
-            "blink_v8_non_json_values_skipped": 0,
-            "recovered_records_count": 0,
-            "recovered_records": [],
-        }
+        return _early_sst_result(valid_footer=True)
 
     raw_mv = memoryview(raw_bytes)
     zstd_blocks = 0
+    sstable_budget_hit = False
     idx_status, idx_bytes, idx_err = _read_and_verify_sstable_block(
         raw_mv,
         footer_off,
@@ -793,46 +709,22 @@ def parse_leveldb_sstable(
     )
     if idx_status == "zstd_unsupported":
         zstd_blocks += 1
-        return {
-            "parser": f"leveldb_sstable_crc32c_snappy_v{__version__}",
-            "valid_sstable_footer": True,
-            "file_size_bytes": total_len,
-            "data_blocks_verified": 0,
-            "snappy_blocks_decompressed": 0,
-            "uncompressed_blocks_read": 0,
-            "zstd_unsupported_blocks_count": zstd_blocks,
-            "corrupted_blocks_count": corrupted_count,
-            "corrupted_blocks_truncated": False,
-            "corrupted_blocks": corrupted_blocks,
-            "value_entries_seen": 0,
-            "tombstone_entries_seen": 0,
-            "blink_v8_non_json_values_skipped": 0,
-            "recovered_records_count": 0,
-            "recovered_records": [],
-        }
+        return _early_sst_result(valid_footer=True, zstd_cnt=zstd_blocks)
     if idx_status != "ok":
         add_corrupt(idx_off, f"Index block verification failed: {idx_err}")
-        return {
-            "parser": f"leveldb_sstable_crc32c_snappy_v{__version__}",
-            "valid_sstable_footer": True,
-            "file_size_bytes": total_len,
-            "data_blocks_verified": 0,
-            "snappy_blocks_decompressed": 0,
-            "uncompressed_blocks_read": 0,
-            "zstd_unsupported_blocks_count": zstd_blocks,
-            "corrupted_blocks_count": corrupted_count,
-            "corrupted_blocks_truncated": False,
-            "corrupted_blocks": corrupted_blocks,
-            "value_entries_seen": 0,
-            "tombstone_entries_seen": 0,
-            "blink_v8_non_json_values_skipped": 0,
-            "recovered_records_count": 0,
-            "recovered_records": [],
-        }
+        return _early_sst_result(
+            valid_footer=True,
+            zstd_cnt=zstd_blocks,
+            b_exceeded=(idx_status == "budget_exceeded"),
+        )
 
     try:
         idx_entries = list(_iter_sstable_block_entries(idx_bytes, active_budget))
-    except (ValueError, BufferError) as exc:
+    except BufferError as exc:
+        add_corrupt(idx_off, f"Malformed SSTable Index Block structure: {exc}")
+        sstable_budget_hit = True
+        idx_entries = []
+    except ValueError as exc:
         add_corrupt(idx_off, f"Malformed SSTable Index Block structure: {exc}")
         idx_entries = []
 
@@ -890,6 +782,7 @@ def parse_leveldb_sstable(
             continue
         if b_status == "budget_exceeded":
             add_corrupt(d_off, b_err)
+            sstable_budget_hit = True
             break
         if b_status != "ok":
             add_corrupt(d_off, b_err)
@@ -951,11 +844,14 @@ def parse_leveldb_sstable(
         except BufferError as exc:
             add_corrupt(d_off, str(exc))
             budget_hit = True
+            sstable_budget_hit = True
         except ValueError as exc:
             add_corrupt(d_off, f"Malformed SSTable Data Block entries: {exc}")
         if budget_hit:
             break
 
+    sst_records_truncated = False
+    generic_fallback_sst = 0
     if collect_raw_ops is None and standalone_ops:
         by_key: Dict[bytes, List[Dict[str, Any]]] = {}
         for sop in standalone_ops:
@@ -965,57 +861,95 @@ def parse_leveldb_sstable(
             head = k_ops[0]
             head_is_tomb = head["op_type"] == 0
             key_hash = hashlib.sha256(ukey).hexdigest()
+            is_dom_key = _is_chromium_domstorage_key(ukey)
             for sop in k_ops:
                 if sop["op_type"] != 1:
                     continue
+                rem_sst = MAX_STORE_RECOVERED_RECORDS - len(recovered_records)
+                if rem_sst <= 0:
+                    sst_records_truncated = True
+                    break
                 vbytes = sop["val_bytes"]
-                carved_objs = _extract_json_objects_from_bytes(vbytes, schema_mode=schema_mode)
+                per_val_lim = min(MAX_OBJECTS_PER_LEVELDB_VALUE, rem_sst + 1)
+                carved_objs = _extract_json_objects_from_bytes(
+                    vbytes, schema_mode=schema_mode, max_objects=per_val_lim
+                )
+                if not carved_objs and schema_mode == "auto" and is_dom_key:
+                    carved_objs = _extract_json_objects_from_bytes(
+                        vbytes, schema_mode="generic-json", max_objects=per_val_lim
+                    )
+                if len(carved_objs) > rem_sst:
+                    carved_objs = carved_objs[:rem_sst]
+                    sst_records_truncated = True
                 norm_list: List[Tuple[Dict[str, Any], str]] = [
                     (normalize_carved_record_fields(obj, s_tag), s_tag) for obj, s_tag in carved_objs
                 ]
-                if not norm_list and schema_mode == "generic-json":
+                if not norm_list and (schema_mode == "generic-json" or (schema_mode == "auto" and is_dom_key)):
                     kv_rec = _extract_lightweight_kv_record(ukey, vbytes)
                     if kv_rec is not None:
                         norm_list.append((kv_rec, "localstorage_kv_text"))
-                if not norm_list and (vbytes.startswith(b"\xff") or vbytes.startswith(b"\x00\xff")):
+                if not norm_list and probe_generic_fallback and schema_mode == "auto" and not is_dom_key:
+                    g_objs = _extract_json_objects_from_bytes(vbytes, schema_mode="generic-json", max_objects=64)
+                    if g_objs:
+                        generic_fallback_sst += len(g_objs)
+                    elif _extract_lightweight_kv_record(ukey, vbytes) is not None:
+                        generic_fallback_sst += 1
+                if not norm_list and is_blink_v8_serialized_value(vbytes):
                     v8_binary_skipped += 1
                 if not norm_list:
                     continue
                 val_hash = hashlib.sha256(vbytes).hexdigest()
-                is_live_entry = (not is_orphan) and (sop is head) and (not head_is_tomb)
+                is_live_entry = (
+                    (not is_orphan)
+                    and (sop is head)
+                    and (not head_is_tomb)
+                    and (not sstable_budget_hit)
+                )
                 for norm, s_tag in norm_list:
+                    if len(recovered_records) >= MAX_STORE_RECOVERED_RECORDS:
+                        sst_records_truncated = True
+                        break
                     del_ts = norm["deletetime"]
                     edit_ts = norm["edittime"]
-                    recovered_records.append(
-                        {
-                            "epistemic_tier": "OBSERVED",
-                            "schema_detected": s_tag,
-                            "source_kind": "orphan_sstable" if is_orphan else "sstable",
-                            "source_file": source_name,
-                            "sstable_level": sstable_level,
-                            "sstable_block_byte_offset": sop["byte_offset"],
-                            "leveldb_sequence_number": sop["seq_num"],
-                            "key_sha256": key_hash,
-                            "value_sha256": val_hash,
-                            "message_id": norm["message_id"],
-                            "sender_mri": norm["sender_mri"],
-                            "composetime": norm["composetime"],
-                            "deletetime": del_ts,
-                            "edittime": edit_ts,
-                            "is_soft_deleted_in_ui": bool(del_ts),
-                            "retention_state": (
+                    rec_item: Dict[str, Any] = {
+                        "epistemic_tier": "OBSERVED",
+                        "schema_detected": s_tag,
+                        "source_kind": "orphan_sstable" if is_orphan else "sstable",
+                        "source_file": source_name,
+                        "sstable_level": sstable_level,
+                        "sstable_block_byte_offset": sop["byte_offset"],
+                        "leveldb_sequence_number": sop["seq_num"],
+                        "key_sha256": key_hash,
+                        "value_sha256": val_hash,
+                        "message_id": norm["message_id"],
+                        "sender_mri": norm["sender_mri"],
+                        "composetime": norm["composetime"],
+                        "deletetime": del_ts,
+                        "edittime": edit_ts,
+                        "is_soft_deleted_in_ui": bool(del_ts),
+                        "retention_state": (
+                            "LIVENESS_INDETERMINATE"
+                            if ((not is_orphan) and (sop is head) and (not head_is_tomb) and sstable_budget_hit)
+                            else (
                                 ("UI_SOFT_DELETED" if del_ts else "LIVE_ACTIVE")
                                 if is_live_entry
                                 else "TOMBSTONED_HISTORICAL_RECOVERED"
-                            ),
-                            "superseded_by_sequence": None if is_live_entry or is_orphan else head["seq_num"],
-                            "superseded_by_tombstone": False if is_live_entry else head_is_tomb,
-                            "cached_content": norm["cached_content"],
-                        }
-                    )
+                            )
+                        ),
+                        "superseded_by_sequence": (
+                            None
+                            if (is_live_entry or is_orphan or (sop is head and sstable_budget_hit))
+                            else head["seq_num"]
+                        ),
+                        "superseded_by_tombstone": False if is_live_entry else head_is_tomb,
+                        "cached_content": norm["cached_content"],
+                    }
+                    if "storage_origin" in norm:
+                        rec_item["storage_origin"] = norm["storage_origin"]
+                    recovered_records.append(rec_item)
         recovered_records.sort(key=lambda r: (r["leveldb_sequence_number"], r["sstable_block_byte_offset"]))
 
-    return {
+    sst_out: Dict[str, Any] = {
         "parser": f"leveldb_sstable_crc32c_snappy_v{__version__}",
         "valid_sstable_footer": True,
         "file_size_bytes": total_len,
@@ -1023,6 +957,7 @@ def parse_leveldb_sstable(
         "snappy_blocks_decompressed": snappy_blocks,
         "uncompressed_blocks_read": raw_blocks,
         "zstd_unsupported_blocks_count": zstd_blocks,
+        "budget_exceeded": sstable_budget_hit,
         "corrupted_blocks_count": corrupted_count,
         "corrupted_blocks_truncated": corrupted_count > MAX_CORRUPTED_RECORDS_REPORTED,
         "corrupted_blocks": corrupted_blocks,
@@ -1030,8 +965,12 @@ def parse_leveldb_sstable(
         "tombstone_entries_seen": tombstones_seen,
         "blink_v8_non_json_values_skipped": v8_binary_skipped,
         "recovered_records_count": len(recovered_records),
+        "recovered_records_truncated": sst_records_truncated,
         "recovered_records": recovered_records,
     }
+    if probe_generic_fallback:
+        sst_out["generic_fallback_records_count"] = generic_fallback_sst
+    return sst_out
 
 
 def _read_length_prefixed_slice(buf: bytes, pos: int) -> Tuple[bytes, int]:
@@ -1183,15 +1122,21 @@ def _extract_wal_raw_ops(
     *,
     source_kind: str = "wal_log",
     budget_state: Dict[str, int] | None = None,
-) -> Tuple[List[Dict[str, Any]], bool]:
+    logical_recs: List[Tuple[int, bytes]] | None = None,
+) -> Tuple[List[Dict[str, Any]], bool, List[Dict[str, Any]]]:
     """Extract raw `(user_key, seq_num, op_type, val_bytes)` operations (incl. `0x00` tombstones) from a `.log` WAL."""
-    logical_recs, _phys_ok, _corr, _corr_tot = iter_leveldb_logical_records(raw_bytes)
+    if logical_recs is None:
+        logical_recs, _phys_ok, _corr, _corr_tot = iter_leveldb_logical_records(raw_bytes)
     ops: List[Dict[str, Any]] = []
+    batch_corrupt: List[Dict[str, Any]] = []
     budget_exceeded = False
 
     # Process WAL batches newest-first so higher-sequence deletions are charged before older puts
     for logical_off, batch in reversed(logical_recs):
         if len(batch) < 12:
+            batch_corrupt.append(
+                {"byte_offset": logical_off, "reason": "WriteBatch shorter than 12-byte header"}
+            )
             continue
         seq_num, declared_count = struct.unpack_from("<QI", batch, 0)
         idx = 12
@@ -1203,22 +1148,22 @@ def _extract_wal_raw_ops(
                 op_type = batch[idx]
                 idx += 1
                 key_len, idx = decode_varint(batch, idx)
-                if key_len > MAX_INTERNAL_KEY_BYTES:
-                    raise ValueError("WAL key exceeds safety cap")
                 if idx + key_len > len(batch):
-                    raise ValueError("Truncated key")
+                    raise ValueError(f"Truncated key bytes (declared={key_len}, remaining={len(batch) - idx})")
                 key_bytes = batch[idx : idx + key_len]
                 idx += key_len
                 if op_type == 1:
                     val_len, idx = decode_varint(batch, idx)
                     if idx + val_len > len(batch):
-                        raise ValueError("Truncated value")
+                        raise ValueError(
+                            f"Truncated value bytes (declared={val_len}, remaining={len(batch) - idx})"
+                        )
                     val_bytes = batch[idx : idx + val_len]
                     idx += val_len
                 elif op_type == 0:
                     val_bytes = b""
                 else:
-                    raise ValueError("Unsupported op_type")
+                    raise ValueError(f"Unsupported WriteBatch op_type=0x{op_type:02x}")
                 staged_cost += len(key_bytes) + len(val_bytes) + PER_OP_OVERHEAD_BYTES
                 if budget_state is not None:
                     cur_ops_rem = budget_state.get("ops_remaining", MAX_STORE_RAW_OPS)
@@ -1241,20 +1186,24 @@ def _extract_wal_raw_ops(
                 parsed_ops += 1
             if budget_exceeded:
                 break
-            if parsed_ops == declared_count and idx == len(batch):
-                if budget_state is not None:
-                    budget_state["ops_remaining"] = max(
-                        0,
-                        budget_state.get("ops_remaining", MAX_STORE_RAW_OPS) - parsed_ops,
-                    )
-                    budget_state["materialized_remaining"] = max(
-                        0,
-                        budget_state.get("materialized_remaining", MAX_STORE_MATERIALIZED_BYTES) - staged_cost,
-                    )
-                ops.extend(staged)
-        except ValueError:
+            if parsed_ops != declared_count:
+                raise ValueError(f"WriteBatch op count mismatch (declared={declared_count}, parsed={parsed_ops})")
+            if idx != len(batch):
+                raise ValueError(f"Trailing unparsed bytes in WriteBatch ({len(batch) - idx} bytes remaining)")
+            if budget_state is not None:
+                budget_state["ops_remaining"] = max(
+                    0,
+                    budget_state.get("ops_remaining", MAX_STORE_RAW_OPS) - parsed_ops,
+                )
+                budget_state["materialized_remaining"] = max(
+                    0,
+                    budget_state.get("materialized_remaining", MAX_STORE_MATERIALIZED_BYTES) - staged_cost,
+                )
+            ops.extend(staged)
+        except ValueError as exc:
+            batch_corrupt.append({"byte_offset": logical_off, "reason": f"Malformed WriteBatch entry: {exc}"})
             continue
-    return ops, budget_exceeded
+    return ops, budget_exceeded, batch_corrupt
 
 
 def _parse_numeric_file_stem(name: str) -> int | None:
@@ -1387,7 +1336,6 @@ def parse_leveldb_store(
             raise OSError("Target path must be a regular file or directory (OS path suppressed in masked mode)")
         raise OSError(f"Target path is neither a regular file nor a directory: {target}")
 
-    budget_state = make_store_budget()
     corrupted_items: List[Dict[str, Any]] = []
     corrupted_total = 0
     sstable_blocks_verified = 0
@@ -1401,12 +1349,15 @@ def parse_leveldb_store(
     reconciled_records: List[Dict[str, Any]] = []
     live_count = 0
     ui_soft_deleted_count = 0
+    liveness_indeterminate_count = 0
     tombstoned_recovered_count = 0
+    any_active_tier_damage = False
 
     any_manifest_present = False
     manifest_comparators_seen: List[str] = []
     total_version_edits = 0
     total_deleted_events = 0
+    target_is_lost_dir = stat.S_ISDIR(st.st_mode) and target.name.rstrip(" .").lower() == "lost"
 
     # Fold MANIFEST-less child buckets nested beneath a MANIFEST-bearing ancestor store into that ancestor as orphans
     for cand_dir in sorted(list(store_buckets.keys()), key=lambda sp: len(sp.parts), reverse=True):
@@ -1431,7 +1382,18 @@ def parse_leveldb_store(
         if merged_into_anc:
             continue
 
-    for store_dir in sorted(store_buckets.keys(), key=lambda sp: str(sp)):
+    sorted_store_dirs = sorted(store_buckets.keys(), key=lambda sp: str(sp))
+    if len(sorted_store_dirs) > MAX_SUBSTORES_RECONCILED:
+        scan_truncated = True
+        sorted_store_dirs = sorted_store_dirs[:MAX_SUBSTORES_RECONCILED]
+
+    records_truncated = False
+    global_snappy_remaining = MAX_GLOBAL_STORE_UNCOMPRESSED_BYTES
+
+    for store_dir in sorted_store_dirs:
+        sub_snappy_cap = min(MAX_STORE_TOTAL_UNCOMPRESSED_BYTES, max(0, global_snappy_remaining))
+        budget_state = make_store_budget(snappy_bytes=sub_snappy_cap)
+        snappy_start = budget_state["remaining"]
         bucket = store_buckets[store_dir]
         b_current: Path | None = bucket["current_file"]
         b_manifests: List[Tuple[int, Path]] = bucket["manifest_files"]
@@ -1447,12 +1409,18 @@ def parse_leveldb_store(
         selected_manifest: Path | None = None
         manifest_expected = b_current is not None or bool(b_manifests)
         manifest_unreliable = False
+        manifest_has_corruption = False
 
         if b_current is not None:
             try:
-                cur_txt = read_bounded_bytes(b_current, max_mb=1, redact=redact).decode("utf-8", errors="ignore").strip()
+                cur_txt = (
+                    read_bounded_bytes(b_current, max_mb=1, redact=redact)
+                    .decode("utf-8", errors="ignore")
+                    .rstrip("\r\n")
+                    .rstrip(" .")
+                )
                 for _m_num, mp in b_manifests:
-                    if mp.name == cur_txt:
+                    if mp.name.rstrip(" .") == cur_txt:
                         selected_manifest = mp
                         break
                 if selected_manifest is None:
@@ -1485,6 +1453,8 @@ def parse_leveldb_store(
             try:
                 man_bytes = read_bounded_bytes(selected_manifest, max_mb=max_mb, redact=redact)
                 manifest_summary = parse_leveldb_manifest(man_bytes)
+                if manifest_summary["corrupted_frames_count"] > 0:
+                    manifest_has_corruption = True
                 corrupted_total += manifest_summary["corrupted_frames_count"]
                 for m_corr in manifest_summary["corrupted_frames"]:
                     if len(corrupted_items) < MAX_CORRUPTED_RECORDS_REPORTED:
@@ -1508,13 +1478,15 @@ def parse_leveldb_store(
                         }
                     )
 
+        substore_comparator: str | None = None
         if manifest_expected:
             any_manifest_present = True
         if manifest_summary is not None:
             total_version_edits += manifest_summary["version_edits_applied"]
             total_deleted_events += manifest_summary["deleted_file_events_count"]
             if manifest_summary["comparator_name"] is not None:
-                manifest_comparators_seen.append(manifest_summary["comparator_name"])
+                substore_comparator = manifest_summary["comparator_name"]
+                manifest_comparators_seen.append(substore_comparator)
 
         has_manifest = manifest_expected
         man_log_num = (
@@ -1535,7 +1507,8 @@ def parse_leveldb_store(
         for lf, forced_orph_log in b_logs:
             lf_num = _parse_numeric_file_stem(lf.name)
             is_stale_wal = (
-                forced_orph_log
+                target_is_lost_dir
+                or forced_orph_log
                 or manifest_unreliable
                 or (
                     has_manifest
@@ -1559,14 +1532,15 @@ def parse_leveldb_store(
         for sf, forced_orph_ldb in b_ldbs_raw:
             fnum = _parse_numeric_file_stem(sf.name)
             if (
-                not forced_orph_ldb
+                not target_is_lost_dir
+                and not forced_orph_ldb
                 and not manifest_unreliable
                 and has_manifest
                 and fnum is not None
                 and fnum in active_levels
             ):
                 active_ldbs.append((sf, active_levels[fnum]))
-            elif forced_orph_ldb or has_manifest:
+            elif target_is_lost_dir or forced_orph_ldb or has_manifest:
                 orphan_ldbs.append(sf)
             else:
                 active_ldbs.append((sf, None))
@@ -1582,53 +1556,155 @@ def parse_leveldb_store(
         orphan_ldbs.sort(key=lambda p: (_parse_numeric_file_stem(p.name) or -1, p.name), reverse=True)
 
         active_liveness_truncated = False
+        substore_has_active_damage = bool(manifest_unreliable or manifest_has_corruption or target_is_lost_dir)
 
-        def _ingest_wal_list(
-            wal_paths: List[Path], kind: str, out_ops: List[Dict[str, Any]], is_active_tier: bool
-        ) -> None:
-            nonlocal wal_logs_parsed, corrupted_total, active_liveness_truncated
-            for lf in wal_paths:
-                try:
-                    lbytes = read_bounded_bytes(lf, max_mb=max_mb, redact=redact)
-                except (OSError, ValueError):
-                    continue
-                wal_logs_parsed += 1
-                _lrecs, _pok, lcorr, lcorr_tot = iter_leveldb_logical_records(lbytes)
-                corrupted_total += lcorr_tot
-                for c_it in lcorr:
-                    if len(corrupted_items) < MAX_CORRUPTED_RECORDS_REPORTED:
-                        c_copy = dict(c_it)
-                        c_copy["source_file"] = "[REDACTED_LOG_FILE]" if redact else lf.name
-                        corrupted_items.append(c_copy)
-                wal_ops, wal_budget_hit = _extract_wal_raw_ops(
-                    lbytes,
-                    lf.name,
-                    source_kind=kind,
-                    budget_state=budget_state,
-                )
-                out_ops.extend(wal_ops)
-                if wal_budget_hit:
-                    if is_active_tier:
-                        active_liveness_truncated = True
+        if has_manifest and not manifest_unreliable and not target_is_lost_dir:
+            if active_levels:
+                present_active_fnums = {
+                    fnum
+                    for sf_present, _lvl_present in active_ldbs
+                    if (fnum := _parse_numeric_file_stem(sf_present.name)) is not None
+                }
+                missing_active_fnums = sorted(set(active_levels.keys()) - present_active_fnums)
+                if missing_active_fnums:
+                    active_liveness_truncated = True
+                    substore_has_active_damage = True
+                    for mf_num in missing_active_fnums:
+                        corrupted_total += 1
+                        if len(corrupted_items) < MAX_CORRUPTED_RECORDS_REPORTED:
+                            corrupted_items.append(
+                                {
+                                    "byte_offset": 0,
+                                    "reason": (
+                                        f"Active SSTable referenced by MANIFEST Level {active_levels[mf_num]} is missing from disk"
+                                        if redact
+                                        else (
+                                            f"Active SSTable #{mf_num:06d}.ldb referenced by MANIFEST "
+                                            f"Level {active_levels[mf_num]} is missing from disk"
+                                        )
+                                    ),
+                                    "source_file": "[REDACTED_SSTABLE_FILE]" if redact else f"{mf_num:06d}.ldb",
+                                }
+                            )
+
+            if man_log_num is not None and man_log_num > 0:
+                present_wal_nums = {
+                    fnum
+                    for lf_present, forced_orph_w in b_logs
+                    if not forced_orph_w and (fnum := _parse_numeric_file_stem(lf_present.name)) is not None
+                }
+                if not any(fnum >= man_log_num for fnum in present_wal_nums):
+                    active_liveness_truncated = True
+                    substore_has_active_damage = True
                     corrupted_total += 1
                     if len(corrupted_items) < MAX_CORRUPTED_RECORDS_REPORTED:
                         corrupted_items.append(
                             {
                                 "byte_offset": 0,
-                                "reason": "Cumulative LevelDB operation/materialized safety budget exceeded in WAL",
+                                "reason": (
+                                    "Active WAL referenced by MANIFEST log_number is missing from disk"
+                                    if redact
+                                    else f"Active WAL #{man_log_num:06d}.log referenced by MANIFEST is missing from disk"
+                                ),
+                                "source_file": "[REDACTED_LOG_FILE]" if redact else f"{man_log_num:06d}.log",
+                            }
+                        )
+
+        def _ingest_wal_list(
+            wal_paths: List[Path],
+            kind: str,
+            out_ops: List[Dict[str, Any]],
+            is_active_tier: bool,
+            cur_budget: Dict[str, int],
+        ) -> None:
+            nonlocal wal_logs_parsed, corrupted_total, active_liveness_truncated, substore_has_active_damage
+            for lf in wal_paths:
+                try:
+                    lbytes = read_bounded_bytes(lf, max_mb=max_mb, redact=redact)
+                except (OSError, ValueError):
+                    if is_active_tier:
+                        active_liveness_truncated = True
+                        substore_has_active_damage = True
+                    corrupted_total += 1
+                    if len(corrupted_items) < MAX_CORRUPTED_RECORDS_REPORTED:
+                        corrupted_items.append(
+                            {
+                                "byte_offset": 0,
+                                "reason": "Unable to read WAL file within --max-mb safety bounds",
+                                "source_file": "[REDACTED_LOG_FILE]" if redact else lf.name,
+                            }
+                        )
+                    continue
+                wal_logs_parsed += 1
+                lrecs, _pok, lcorr, lcorr_tot = iter_leveldb_logical_records(lbytes)
+                corrupted_total += lcorr_tot
+                if is_active_tier and lcorr_tot > 0:
+                    substore_has_active_damage = True
+                for c_it in lcorr:
+                    if len(corrupted_items) < MAX_CORRUPTED_RECORDS_REPORTED:
+                        c_copy = dict(c_it)
+                        c_copy["source_file"] = "[REDACTED_LOG_FILE]" if redact else lf.name
+                        corrupted_items.append(c_copy)
+                wal_ops, wal_budget_hit, wb_corr = _extract_wal_raw_ops(
+                    lbytes,
+                    lf.name,
+                    source_kind=kind,
+                    budget_state=cur_budget,
+                    logical_recs=lrecs,
+                )
+                if wb_corr:
+                    corrupted_total += len(wb_corr)
+                    if is_active_tier:
+                        substore_has_active_damage = True
+                    for wc_it in wb_corr:
+                        if len(corrupted_items) < MAX_CORRUPTED_RECORDS_REPORTED:
+                            wc_copy = dict(wc_it)
+                            wc_copy["source_file"] = "[REDACTED_LOG_FILE]" if redact else lf.name
+                            corrupted_items.append(wc_copy)
+                out_ops.extend(wal_ops)
+                if wal_budget_hit:
+                    if is_active_tier:
+                        active_liveness_truncated = True
+                        substore_has_active_damage = True
+                    corrupted_total += 1
+                    if len(corrupted_items) < MAX_CORRUPTED_RECORDS_REPORTED:
+                        corrupted_items.append(
+                            {
+                                "byte_offset": 0,
+                                "reason": (
+                                    f"Cumulative LevelDB operation ({MAX_STORE_RAW_OPS}-op) or materialized "
+                                    f"({MAX_STORE_MATERIALIZED_BYTES // (1024 * 1024)} MiB) safety budget exceeded in WAL"
+                                ),
                                 "source_file": "[REDACTED_LOG_FILE]" if redact else lf.name,
                             }
                         )
                     break
 
         def _ingest_sstable_item(
-            sf: Path, lvl: int | None, is_orph: bool, out_ops: List[Dict[str, Any]]
+            sf: Path,
+            lvl: int | None,
+            is_orph: bool,
+            out_ops: List[Dict[str, Any]],
+            cur_budget: Dict[str, int],
         ) -> None:
             nonlocal active_sstables_parsed, orphan_sstables_parsed, active_liveness_truncated
-            nonlocal sstable_blocks_verified, snappy_blocks_decompressed, zstd_unsupported_blocks, corrupted_total
+            nonlocal sstable_blocks_verified, snappy_blocks_decompressed, zstd_unsupported_blocks
+            nonlocal corrupted_total, substore_has_active_damage
             try:
                 sbytes = read_bounded_bytes(sf, max_mb=max_mb, redact=redact)
             except (OSError, ValueError):
+                if not is_orph:
+                    active_liveness_truncated = True
+                    substore_has_active_damage = True
+                corrupted_total += 1
+                if len(corrupted_items) < MAX_CORRUPTED_RECORDS_REPORTED:
+                    corrupted_items.append(
+                        {
+                            "byte_offset": 0,
+                            "reason": "Unable to read SSTable file within --max-mb safety bounds",
+                            "source_file": "[REDACTED_SSTABLE_FILE]" if redact else sf.name,
+                        }
+                    )
                 return
             if is_orph:
                 orphan_sstables_parsed += 1
@@ -1637,7 +1713,7 @@ def parse_leveldb_store(
             s_res = parse_leveldb_sstable(
                 sbytes,
                 schema_mode=schema_mode,
-                budget_state=budget_state,
+                budget_state=cur_budget,
                 collect_raw_ops=out_ops,
                 source_name=sf.name,
                 sstable_level=lvl,
@@ -1647,8 +1723,12 @@ def parse_leveldb_store(
             snappy_blocks_decompressed += s_res["snappy_blocks_decompressed"]
             zstd_unsupported_blocks += s_res["zstd_unsupported_blocks_count"]
             corrupted_total += s_res["corrupted_blocks_count"]
-            if not is_orph and any("safety budget" in str(c.get("reason", "")) for c in s_res["corrupted_blocks"]):
-                active_liveness_truncated = True
+            if not is_orph:
+                if s_res["budget_exceeded"]:
+                    active_liveness_truncated = True
+                    substore_has_active_damage = True
+                if s_res["corrupted_blocks_count"] > 0 or s_res["zstd_unsupported_blocks_count"] > 0:
+                    substore_has_active_damage = True
             for c_blk in s_res["corrupted_blocks"]:
                 if len(corrupted_items) < MAX_CORRUPTED_RECORDS_REPORTED:
                     c_copy = dict(c_blk)
@@ -1656,12 +1736,17 @@ def parse_leveldb_store(
                     corrupted_items.append(c_copy)
 
         # Strict 4-tier ingestion priority: Active WALs -> Active SSTables -> Stale WALs -> Orphan SSTables
-        _ingest_wal_list(active_wals, "wal_log", raw_ops, True)
+        _ingest_wal_list(active_wals, "wal_log", raw_ops, True, budget_state)
         for sf_act, lvl_act in active_ldbs:
-            _ingest_sstable_item(sf_act, lvl_act, False, raw_ops)
-        _ingest_wal_list(stale_wals, "orphan_wal_log", raw_ops, False)
+            _ingest_sstable_item(sf_act, lvl_act, False, raw_ops, budget_state)
+        _ingest_wal_list(stale_wals, "orphan_wal_log", raw_ops, False, budget_state)
         for sf_orph in orphan_ldbs:
-            _ingest_sstable_item(sf_orph, None, True, raw_ops)
+            _ingest_sstable_item(sf_orph, None, True, raw_ops, budget_state)
+
+        global_snappy_remaining -= max(0, snappy_start - budget_state["remaining"])
+
+        if substore_has_active_damage:
+            any_active_tier_damage = True
 
         # Reconcile keys strictly within `store_dir` so independent sub-stores never mix key spaces
         ops_by_key: Dict[bytes, List[Dict[str, Any]]] = {}
@@ -1682,8 +1767,8 @@ def parse_leveldb_store(
             )
             active_key_ops = (
                 [x for x in key_ops if x["source_kind"] not in ("orphan_sstable", "orphan_wal_log")]
-                if has_manifest
-                else key_ops
+                if not target_is_lost_dir
+                else []
             )
             newest_overall = key_ops[0]
             active_head = active_key_ops[0] if active_key_ops else None
@@ -1691,55 +1776,124 @@ def parse_leveldb_store(
                 active_head["op_type"] == 0 if active_head is not None else newest_overall["op_type"] == 0
             )
             sup_ref_seq = active_head["seq_num"] if active_head is not None else newest_overall["seq_num"]
+
+            key_liveness_indeterminate = bool(
+                manifest_unreliable
+                or active_liveness_truncated
+                or target_is_lost_dir
+                or (
+                    manifest_has_corruption
+                    and (
+                        active_head is None
+                        or newest_overall["seq_num"] > active_head["seq_num"]
+                    )
+                )
+            )
+            indeterminate_head_op = (
+                (active_head if active_head is not None else newest_overall)
+                if key_liveness_indeterminate
+                else None
+            )
             live_val_hash = (
                 hashlib.sha256(active_head["val_bytes"]).hexdigest()
-                if (active_head is not None and active_head["op_type"] == 1 and not effective_is_tombstone)
+                if (
+                    not key_liveness_indeterminate
+                    and active_head is not None
+                    and active_head["op_type"] == 1
+                    and not effective_is_tombstone
+                )
+                else ""
+            )
+            indet_val_hash = (
+                hashlib.sha256(indeterminate_head_op["val_bytes"]).hexdigest()
+                if (indeterminate_head_op is not None and indeterminate_head_op["op_type"] == 1)
                 else ""
             )
             key_hash = hashlib.sha256(ukey).hexdigest()
+            is_dom_key = _is_chromium_domstorage_key(ukey) and substore_comparator != "idb_cmp1"
 
-            seen_val_hashes_for_key: Set[Tuple[str, bool]] = set()
+            seen_val_hashes_for_key: Set[Tuple[str, str]] = set()
             for op in key_ops:
                 if op["op_type"] != 1:
                     continue
                 val_bytes = op["val_bytes"]
                 val_hash = hashlib.sha256(val_bytes).hexdigest()
+                is_indeterminate_head = (
+                    indeterminate_head_op is not None
+                    and op is indeterminate_head_op
+                    and indeterminate_head_op["op_type"] == 1
+                )
                 is_live_head = (
-                    active_head is not None
+                    not key_liveness_indeterminate
+                    and active_head is not None
                     and op is active_head
                     and not effective_is_tombstone
-                    and not active_liveness_truncated
                 )
-                is_evicted_orphan_only = (has_manifest and active_head is None) or (
-                    op["source_kind"] in ("orphan_sstable", "orphan_wal_log") and active_head is None
+                is_evicted_orphan_only = (
+                    not key_liveness_indeterminate
+                    and (
+                        (has_manifest and active_head is None)
+                        or (op["source_kind"] in ("orphan_sstable", "orphan_wal_log") and active_head is None)
+                    )
                 )
 
-                # Deduplicate compacted/orphan mirrors of the same value unless retention differs
-                dedup_sig = (val_hash, is_live_head)
+                role_bucket = (
+                    "indet" if is_indeterminate_head else ("live" if is_live_head else "hist")
+                )
+                dedup_sig = (val_hash, role_bucket)
                 if dedup_sig in seen_val_hashes_for_key:
                     continue
-                if not is_live_head and live_val_hash and val_hash == live_val_hash:
+                if role_bucket == "hist" and (
+                    (live_val_hash and val_hash == live_val_hash)
+                    or (indet_val_hash and val_hash == indet_val_hash)
+                ):
                     continue
                 seen_val_hashes_for_key.add(dedup_sig)
 
-                carved_objs = _extract_json_objects_from_bytes(val_bytes, schema_mode=schema_mode)
+                rem_store_recs = MAX_STORE_RECOVERED_RECORDS - len(reconciled_records)
+                if rem_store_recs <= 0:
+                    records_truncated = True
+                    continue
+
+                per_val_cap = min(MAX_OBJECTS_PER_LEVELDB_VALUE, rem_store_recs + 1)
+                carved_objs = _extract_json_objects_from_bytes(
+                    val_bytes, schema_mode=schema_mode, max_objects=per_val_cap
+                )
+                if not carved_objs and schema_mode == "auto" and is_dom_key:
+                    carved_objs = _extract_json_objects_from_bytes(
+                        val_bytes, schema_mode="generic-json", max_objects=per_val_cap
+                    )
+                if len(carved_objs) > rem_store_recs:
+                    carved_objs = carved_objs[:rem_store_recs]
+                    records_truncated = True
                 norm_items: List[Tuple[Dict[str, Any], str]] = [
                     (normalize_carved_record_fields(obj, s_tag), s_tag) for obj, s_tag in carved_objs
                 ]
-                if not norm_items and schema_mode == "generic-json":
+                if not norm_items and (
+                    schema_mode == "generic-json"
+                    or (schema_mode == "auto" and is_dom_key and substore_comparator != "idb_cmp1")
+                ):
                     kv_rec = _extract_lightweight_kv_record(ukey, val_bytes)
                     if kv_rec is not None:
                         norm_items.append((kv_rec, "localstorage_kv_text"))
 
-                if not norm_items and (val_bytes.startswith(b"\xff") or val_bytes.startswith(b"\x00\xff")):
+                if not norm_items and is_blink_v8_serialized_value(val_bytes):
                     v8_binary_skipped += 1
 
                 for norm, s_tag in norm_items:
+                    if len(reconciled_records) >= MAX_STORE_RECOVERED_RECORDS:
+                        records_truncated = True
+                        break
                     del_ts = norm["deletetime"]
                     edit_ts = norm["edittime"]
-                    if not is_live_head:
+                    if is_indeterminate_head:
+                        ret_state = "LIVENESS_INDETERMINATE"
+                        sup_seq: int | None = None
+                        sup_tomb = False
+                        liveness_indeterminate_count += 1
+                    elif not is_live_head:
                         ret_state = "TOMBSTONED_HISTORICAL_RECOVERED"
-                        sup_seq: int | None = (
+                        sup_seq = (
                             None
                             if (is_evicted_orphan_only or op["seq_num"] > sup_ref_seq)
                             else sup_ref_seq
@@ -1757,30 +1911,33 @@ def parse_leveldb_store(
                         sup_tomb = False
                         live_count += 1
 
-                    reconciled_records.append(
-                        {
-                            "epistemic_tier": "OBSERVED",
-                            "schema_detected": s_tag,
-                            "source_kind": op["source_kind"],
-                            "source_file": "[REDACTED_SOURCE_FILE]" if redact else op["source_name"],
-                            "sstable_level": op["sstable_level"],
-                            "byte_offset": op["byte_offset"],
-                            "leveldb_sequence_number": op["seq_num"],
-                            "key_sha256": key_hash,
-                            "value_sha256": val_hash,
-                            "message_id": norm["message_id"],
-                            "sender_mri": norm["sender_mri"],
-                            "composetime": norm["composetime"],
-                            "deletetime": del_ts,
-                            "edittime": edit_ts,
-                            "is_soft_deleted_in_ui": bool(del_ts),
-                            "retention_state": ret_state,
-                            "evicted_from_manifest": is_evicted_orphan_only,
-                            "superseded_by_sequence": sup_seq,
-                            "superseded_by_tombstone": sup_tomb,
-                            "cached_content": norm["cached_content"],
-                        }
-                    )
+                    rec_out: Dict[str, Any] = {
+                        "epistemic_tier": "OBSERVED",
+                        "schema_detected": s_tag,
+                        "source_kind": op["source_kind"],
+                        "source_file": "[REDACTED_SOURCE_FILE]" if redact else op["source_name"],
+                        "sstable_level": op["sstable_level"],
+                        "byte_offset": op["byte_offset"],
+                        "leveldb_sequence_number": op["seq_num"],
+                        "key_sha256": key_hash,
+                        "value_sha256": val_hash,
+                        "message_id": norm["message_id"],
+                        "sender_mri": norm["sender_mri"],
+                        "composetime": norm["composetime"],
+                        "deletetime": del_ts,
+                        "edittime": edit_ts,
+                        "is_soft_deleted_in_ui": bool(del_ts),
+                        "retention_state": ret_state,
+                        "evicted_from_manifest": is_evicted_orphan_only,
+                        "superseded_by_sequence": sup_seq,
+                        "superseded_by_tombstone": sup_tomb,
+                        "cached_content": norm["cached_content"],
+                    }
+                    if "storage_origin" in norm:
+                        rec_out["storage_origin"] = norm["storage_origin"]
+                    if substore_has_active_damage and ret_state in ("LIVE_ACTIVE", "UI_SOFT_DELETED"):
+                        rec_out["unverified_active_corruption_in_store"] = True
+                    reconciled_records.append(rec_out)
 
     reconciled_records.sort(key=lambda r: (r["leveldb_sequence_number"], r["byte_offset"]))
 
@@ -1788,6 +1945,13 @@ def parse_leveldb_store(
         "External IndexedDB .blob directory/entries detected alongside LevelDB tables; oversized "
         "externalized values live outside .ldb SSTables and are not reconstructed by this parser."
         if blob_entries > 0
+        else None
+    )
+    liveness_caveat = (
+        "One or more active LevelDB regions contained corrupted frames/blocks, Zstandard (0x02) blocks, "
+        "broken MANIFEST pointers, missing MANIFEST-referenced SSTables/WALs, or safety-budget truncations; "
+        "unseen newer 0x00 tombstones or overwrites inside unreadable or missing regions cannot be ruled out."
+        if any_active_tier_damage
         else None
     )
 
@@ -1808,7 +1972,7 @@ def parse_leveldb_store(
         "target_label": "[REDACTED_TARGET_PATH]" if redact else str(target),
         "schema_mode": schema_mode,
         "scan_capped_at_max_files": scan_truncated,
-        "leveldb_stores_reconciled": len(store_buckets),
+        "leveldb_stores_reconciled": len(sorted_store_dirs),
         "manifest_present": any_manifest_present,
         "manifest_comparator": raw_comp,
         "manifest_version_edits_applied": total_version_edits,
@@ -1823,13 +1987,17 @@ def parse_leveldb_store(
         "indexeddb_blob_entries_detected": blob_entries,
         "sqlite_co_located_files_detected": sqlite_entries,
         "external_blob_warning": blob_warning,
+        "active_tier_has_unreadable_or_corrupted_regions": any_active_tier_damage,
+        "liveness_caveat": liveness_caveat,
         "tombstone_markers_seen": tombstones_total,
         "corrupted_blocks_or_frames_count": corrupted_total,
         "corrupted_blocks_or_frames_truncated": corrupted_total > MAX_CORRUPTED_RECORDS_REPORTED,
         "corrupted_blocks_or_frames": corrupted_items,
         "recovered_records_count": len(reconciled_records),
+        "recovered_records_truncated": records_truncated,
         "live_active_records_count": live_count,
         "ui_soft_deleted_records_count": ui_soft_deleted_count,
+        "liveness_indeterminate_records_count": liveness_indeterminate_count,
         "tombstoned_historical_recovered_count": tombstoned_recovered_count,
         "recovered_records": reconciled_records,
     }

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Ziqi Xiao
+# SPDX-License-Identifier: MIT
+.git/
+.github/
+.clusterfuzzlite/
+.ruff_cache/
+.pytest_cache/
+.coverage*
+__pycache__/
+*.py[cod]
+*$py.class
+dist/
+build/
+*.egg-info/
+tests/
+benchmark/
+scripts/

@@ -992,6 +992,7 @@ class TestV040SSTableAndFixes(unittest.TestCase):
             )
             (ot_dir / "MANIFEST-000002").write_bytes(encode_leveldb_log_record(REC_FULL, ve_ot))
             (ot_dir / "CURRENT").write_text("MANIFEST-000002\n", encoding="utf-8")
+            (ot_dir / "000006.log").write_bytes(b"")
             (ot_dir / "000007.ldb").write_bytes(build_leveldb_sstable([(b"k1", 99, 0, b"")]))  # orphan tombstone!
             (ot_dir / "lost").mkdir()
             (ot_dir / "lost" / "000003.ldb").write_bytes(
@@ -1108,7 +1109,7 @@ class TestV040SSTableAndFixes(unittest.TestCase):
             self.assertTrue(prio_by_id["m_del"]["superseded_by_tombstone"])
             self.assertEqual(prio_by_id["m_del"]["superseded_by_sequence"], 200)
 
-            # 3. Missing/broken CURRENT->MANIFEST fails closed (never promotes obsolete SSTables to LIVE_ACTIVE)
+            # 3. Missing/broken CURRENT->MANIFEST fails closed (never promotes obsolete SSTables to LIVE_ACTIVE; marks LIVENESS_INDETERMINATE)
             broken_man_dir = td / "broken_manifest_store"
             broken_man_dir.mkdir()
             (broken_man_dir / "000005.ldb").write_bytes(sst_50)
@@ -1117,8 +1118,9 @@ class TestV040SSTableAndFixes(unittest.TestCase):
             self.assertTrue(res_bm["manifest_present"])
             self.assertGreaterEqual(res_bm["corrupted_blocks_or_frames_count"], 1)
             self.assertEqual(res_bm["live_active_records_count"], 0)
+            self.assertEqual(res_bm["liveness_indeterminate_records_count"], 2)
             for rec_bm in res_bm["recovered_records"]:
-                self.assertEqual(rec_bm["retention_state"], "TOMBSTONED_HISTORICAL_RECOVERED")
+                self.assertEqual(rec_bm["retention_state"], "LIVENESS_INDETERMINATE")
 
             # 4. Standalone single-file SSTable reconciles in-file `0x00` tombstone
             in_sst_del = build_leveldb_sstable(

@@ -1,6 +1,6 @@
 # Security Assurance Case, Architecture & Scope Boundaries
 
-> **Structured Software Assurance Case (structured per NIST IR 7608)** for `starshield-forensics` (`v0.4.0`).
+> **Structured Software Assurance Case (structured per NIST IR 7608)** for `starshield-forensics` (`v0.4.1`).
 
 ---
 
@@ -101,14 +101,14 @@ Forensic inputs (Chromium caches, screenshots, exported chat JSONs) originate fr
 2. **Static Security & Style Analysis:** `GitHub CodeQL`, `PyCQA Bandit`, and `Astral Ruff` execute automatically on every push/PR in CI with zero findings permitted.
 3. **Bit-for-Bit Reproducible Builds:** `scripts/build_reproducible.py --verify` builds `starshield.pyz` twice from source and asserts identical `SHA-256` digests in CI, paired with `scripts/generate_spdx_sbom.py --verify` for ISO/IEC 5962:2021 SPDX 2.3 SBOM verification.
 4. **Continuous Coverage-Guided & Mutation Fuzzing (`Fuzzing: 10/10`):** `tests/fuzz_parsers.py` + `.clusterfuzzlite/` (`google/clusterfuzzlite` + `Atheris` libFuzzer in `.github/workflows/cflite.yml`) continuously fuzz LevelDB 32 KiB WAL block reassembly, Snappy `.ldb` SSTable & `MANIFEST` decoding, PNG `iCCP` zlib streams, multi-segment JPEG `APP2`/`8BIM` & PDF containers, and ISO-7812/13616/9362 checksum validators, achieving `10/10` on the OpenSSF Scorecard `Fuzzing` check (`8.0/10` overall).
-5. **Cross-Tool & Specification Test Harness (`542` Vectors):** `scripts/verify_cross_tool_forensics.py` verifies 542 deterministic vectors (`6` LevelDB WAL, `4` LevelDB SSTable/MANIFEST, `6` PNG/JPEG container, and `526` check-digit/registry vectors; compares against Google `dfindexeddb` and `Pillow` when installed in an isolated QA venv via `--require-external`).
+5. **Cross-Tool & Specification Test Harness (`611` Vectors):** `scripts/verify_cross_tool_forensics.py` verifies 611 deterministic vectors (`13` external differential vectors against Google `dfindexeddb` and `Pillow` when installed in an isolated QA venv via `--require-external`, plus `598` specification and check-digit/registry vectors).
 
 ---
 
 ## 7. Architectural Format Boundaries & Explicit Non-Goals (`documentation_roadmap`)
 
-### Current Format & Evidentiary Boundaries (`v0.4.0`)
-- **LevelDB `.log` + Snappy `.ldb` + `MANIFEST` Scope:** Parses 32 KiB `.log` `WriteBatch` frames, uncompressed (`0x00`) & Snappy-compressed (`0x01`) `.ldb` SSTable blocks (verifying 5-byte Castagnoli CRC32C trailers), and `MANIFEST-*` `VersionEdit` state transitions to reconcile `LIVE_ACTIVE`, `UI_SOFT_DELETED`, and `TOMBSTONED_HISTORICAL_RECOVERED` records; does **not** decompress Zstandard (`0x02`) SSTable blocks, reconstruct externalized `.blob` files, deserialize binary-only Blink V8 `StructuredClone` AST objects, or inspect SQLite B-Tree / `-wal` stores (such as newly created Chrome 156+ IndexedDB stores).
+### Current Format & Evidentiary Boundaries (`v0.4.1`)
+- **LevelDB `.log` + Snappy `.ldb` + `MANIFEST` Scope:** Parses 32 KiB `.log` `WriteBatch` frames, uncompressed (`0x00`) & Snappy-compressed (`0x01`) `.ldb` SSTable blocks (verifying 5-byte Castagnoli CRC32C trailers), and `MANIFEST-*` `VersionEdit` state transitions to reconcile `LIVE_ACTIVE`, `UI_SOFT_DELETED`, `LIVENESS_INDETERMINATE`, and `TOMBSTONED_HISTORICAL_RECOVERED` records; does **not** decompress Zstandard (`0x02`) SSTable blocks, reconstruct externalized `.blob` files, deserialize binary-only Blink V8 `StructuredClone` AST objects, or inspect SQLite B-Tree / `-wal` stores (such as newly created Chrome 156+ IndexedDB stores).
 - **Container Structure Observation Only:** PNG, JPEG, and PDF container inspectors report deterministic structural markers (`CRC32`, `ICC_PROFILE`, structural trailer `%%EOF`, `/Info`, XMP) alongside benign explanations; they never claim pixel forgery or tamper authentication.
 
 ### Explicit Non-Goals (What the Project Intends NOT to Do)

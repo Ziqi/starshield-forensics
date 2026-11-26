@@ -66,7 +66,7 @@ class TestV039Upgrades(unittest.TestCase):
     def test_version_and_zero_commercial_or_stale_strings(self) -> None:
         stale_ver = ".".join(("0", "3", "6"))
         banned_fee = " ".join(("pilot", "fee"))
-        self.assertEqual(__version__, "0.4.0")
+        self.assertEqual(__version__, "0.4.1")
         for py_file in (REPO_ROOT / "starshield").glob("*.py"):
             src = py_file.read_text(encoding="utf-8")
             self.assertIn("SPDX-License-Identifier: MIT", src, f"Missing SPDX in {py_file.name}")
@@ -77,7 +77,7 @@ class TestV039Upgrades(unittest.TestCase):
             empty_dir = Path(tmp) / "empty_store"
             empty_dir.mkdir()
             pre = inspect_chromium_storage_path(empty_dir, redact=True)
-            self.assertEqual(pre["tool_version"], "starshield-forensics/0.4.0")
+            self.assertEqual(pre["tool_version"], "starshield-forensics/0.4.1")
             self.assertIn("Chrome 156+", pre["intake_guidance"])
             self.assertNotIn(banned_fee, json.dumps(pre).lower())
 
@@ -275,7 +275,7 @@ class TestV039Upgrades(unittest.TestCase):
             self.assertNotIn("actor_alpha", triage_str)
             self.assertNotIn("--unredacted", triage_str)
             tag = triage_json["pseudonym_session_tag"]
-            self.assertRegex(tag, r"^[0-9A-F]{4}$")
+            self.assertRegex(tag, r"^[0-9A-F]{8}$")
             rec0 = triage_json["triage_result"]["soft_deleted_records"][0]
             self.assertEqual(rec0["extracted_currency_amounts"], ["GBP 18,400.00"])
             self.assertEqual(rec0["extracted_iocs"]["mod97_validated_ibans"], [f"<IBAN_GB_{tag}_01>"])
@@ -413,7 +413,7 @@ class TestV039Upgrades(unittest.TestCase):
             wal_payload = json.loads(lines[0]["result"]["content"][0]["text"])
             json_payload = json.loads(lines[1]["result"]["content"][0]["text"])
             s_tag = wal_payload["pseudonym_session_tag"]
-            self.assertTrue(re.fullmatch(r"[0-9A-F]{4}", s_tag))
+            self.assertTrue(re.fullmatch(r"[0-9A-F]{8}", s_tag))
 
             wal_ibans = wal_payload["leveldb_wal_analysis"]["recovered_records"][1]["extracted_iocs"][
                 "mod97_validated_ibans"

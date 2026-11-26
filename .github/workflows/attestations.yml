@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to attest and attach SLSA L3 provenance to"
+        description: "Release tag to build from source, verify, and attach SLSA L3 provenance to"
         required: false
-        default: "v0.4.0"
+        default: "v0.4.1"
         type: string
   release:
     types: [published]
@@ -15,73 +15,94 @@ permissions:
   contents: read
 
 jobs:
-  build-and-attest:
+  build-and-verify:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
-      attestations: write
+      actions: read
     outputs:
       subjects_b64: ${{ steps.subjects.outputs.subjects_b64 }}
       release_tag: ${{ steps.subjects.outputs.release_tag }}
+      ver: ${{ steps.subjects.outputs.ver }}
+      pyz_sha256: ${{ steps.subjects.outputs.pyz_sha256 }}
+      wheel_sha256: ${{ steps.subjects.outputs.wheel_sha256 }}
+      sdist_sha256: ${{ steps.subjects.outputs.sdist_sha256 }}
+      sbom_sha256: ${{ steps.subjects.outputs.sbom_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.release.tag_name || inputs.release_tag || 'v0.4.1' }}
           persist-credentials: false
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
-      - name: Build reproducible zipapp, verify signed release digests & generate SPDX 2.3 SBOM
+      - name: Verify latest CI status on main, build reproducible distributions on runner & verify pinned Ed25519 signature
         id: subjects
         env:
           INPUT_TAG: ${{ inputs.release_tag }}
           EVENT_TAG: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="${EVENT_TAG:-${INPUT_TAG:-v0.4.0}}"
+          TAG="${EVENT_TAG:-${INPUT_TAG:-v0.4.1}}"
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Invalid release tag format: $TAG" >&2
             exit 1
           fi
           VER="${TAG#v}"
+          COMMIT_SHA="$(git rev-parse HEAD)"
+
+          # Gate 1: Latest completed non-PR StarShield Deterministic CI run on HEAD SHA (and latest push on main) must be green
+          python - "$COMMIT_SHA" <<'PYEOF'
+          import json, os, sys, urllib.request
+          sha = sys.argv[1]
+          url = f"https://api.github.com/repos/Ziqi/starshield-forensics/actions/workflows/ci.yml/runs?head_sha={sha}&status=completed&per_page=10"
+          req = urllib.request.Request(url, headers={
+              "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "starshield-release-gate",
+          })
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              runs = json.loads(resp.read().decode("utf-8")).get("workflow_runs", [])
+          eligible = [r for r in runs if r.get("head_sha") == sha and r.get("event") in ("push", "workflow_dispatch")]
+          if not eligible or eligible[0].get("conclusion") != "success":
+              latest = eligible[0].get("conclusion") if eligible else "none"
+              raise SystemExit(f"Refusing to attest {sha}: latest completed CI run conclusion is {latest!r} (expected 'success')")
+          main_pushes = [r for r in eligible if r.get("event") == "push" and r.get("head_branch") == "main"]
+          if main_pushes and main_pushes[0].get("conclusion") != "success":
+              raise SystemExit(f"Refusing to attest {sha}: latest push/main CI run conclusion is {main_pushes[0].get('conclusion')!r}")
+          print(f"CI_GATE_OK commit={sha} latest_run_id={eligible[0].get('id')}")
+          PYEOF
+
           BASE_URL="https://github.com/Ziqi/starshield-forensics/releases/download/${TAG}"
           WHL_NAME="starshield_forensics-${VER}-py3-none-any.whl"
           SDIST_NAME="starshield_forensics-${VER}.tar.gz"
           SBOM_NAME="starshield-forensics-${VER}.spdx.json"
 
+          # Gate 2: Build pyz, wheel, and sdist natively from checked-out source on this isolated GitHub runner
           mkdir -p dist /tmp/release-sig
-          python scripts/build_reproducible.py --verify --output dist/starshield.pyz
-          if [[ "$TAG" == "v0.4.0" ]]; then
-            echo "2a33b6376f8e0ea256b7736315ed0dd4dc381f664992a064ca164fbac39c5494  dist/starshield.pyz" | sha256sum -c -
+          python scripts/build_reproducible.py --all-dists --dist-dir dist --verify
+          if [[ "$TAG" == "v0.4.1" ]]; then
+            echo "baa92b331b5e8529f3077e2391d90540d984652d8fd9d49c84775dd33e681620  dist/starshield.pyz" | sha256sum -c -
           else
             echo "Refusing unpinned release tag $TAG: update pinned starshield.pyz SHA-256 before attestation" >&2
             exit 1
           fi
 
+          # Gate 3: Dual-control verification against workflow-pinned Ed25519 maintainer public key
+          echo "3564cabff873e322de8b9da114fe0954f4f8fd69333a999ac0ceefeff81bca04  KEYS.pub" | sha256sum -c -
+          printf '%s\n' '2196305+Ziqi@users.noreply.github.com namespaces="file,git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKz9qGDNELwOsoNnmZIpLKQ+5HOqdE4ilZaTRA/1LR7a' > /tmp/release-sig/pinned_signers.pub
+
           curl -fsSL -o /tmp/release-sig/SHA256SUMS "${BASE_URL}/SHA256SUMS"
           curl -fsSL -o /tmp/release-sig/SHA256SUMS.sig "${BASE_URL}/SHA256SUMS.sig"
-          curl -fsSL -o "dist/${WHL_NAME}" "${BASE_URL}/${WHL_NAME}"
-          curl -fsSL -o "dist/${SDIST_NAME}" "${BASE_URL}/${SDIST_NAME}"
 
           ssh-keygen -Y verify \
-            -f KEYS.pub \
+            -f /tmp/release-sig/pinned_signers.pub \
             -I "2196305+Ziqi@users.noreply.github.com" \
             -n file \
             -s /tmp/release-sig/SHA256SUMS.sig < /tmp/release-sig/SHA256SUMS
-
-          (
-            cd dist
-            for req_asset in "starshield.pyz" "${WHL_NAME}" "${SDIST_NAME}"; do
-              line="$(awk -v target="$req_asset" 'length($1) == 64 && $1 ~ /^[0-9a-f]+$/ && ($2 == target || $2 == ("*" target)) && NF == 2 { print; exit }' /tmp/release-sig/SHA256SUMS)"
-              if [[ -z "$line" ]]; then
-                echo "Missing required SHA256SUMS entry for ${req_asset}" >&2
-                exit 1
-              fi
-              printf '%s\n' "$line" | sha256sum -c -
-            done
-          )
 
           python scripts/generate_spdx_sbom.py \
             --verify \
@@ -91,32 +112,36 @@ jobs:
             --require-dists \
             --output "dist/${SBOM_NAME}"
 
+          (
+            cd dist
+            for req_asset in "starshield.pyz" "${WHL_NAME}" "${SDIST_NAME}" "${SBOM_NAME}"; do
+              line="$(awk -v target="$req_asset" 'length($1) == 64 && $1 ~ /^[0-9a-f]+$/ && ($2 == target || $2 == ("*" target)) && NF == 2 { print; exit }' /tmp/release-sig/SHA256SUMS)"
+              if [[ -z "$line" ]]; then
+                echo "Missing required SHA256SUMS entry for ${req_asset}" >&2
+                exit 1
+              fi
+              printf '%s\n' "$line" | sha256sum -c -
+            done
+          )
+
+          PYZ_SHA="$(sha256sum dist/starshield.pyz | awk '{print $1}')"
+          WHL_SHA="$(sha256sum "dist/${WHL_NAME}" | awk '{print $1}')"
+          SDIST_SHA="$(sha256sum "dist/${SDIST_NAME}" | awk '{print $1}')"
+          SBOM_SHA="$(sha256sum "dist/${SBOM_NAME}" | awk '{print $1}')"
           B64="$(cd dist && sha256sum \
             starshield.pyz \
             "${WHL_NAME}" \
             "${SDIST_NAME}" \
             "${SBOM_NAME}" | base64 -w0)"
-          echo "subjects_b64=${B64}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
-
-      - name: Attest artifact build provenance (Sigstore Fulcio + Rekor)
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: |
-            dist/starshield.pyz
-            dist/starshield_forensics-${{ steps.subjects.outputs.ver }}-py3-none-any.whl
-            dist/starshield_forensics-${{ steps.subjects.outputs.ver }}.tar.gz
-            dist/starshield-forensics-${{ steps.subjects.outputs.ver }}.spdx.json
-
-      - name: Attest SPDX 2.3 SBOM (Sigstore Fulcio + Rekor)
-        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
-        with:
-          subject-path: |
-            dist/starshield.pyz
-            dist/starshield_forensics-${{ steps.subjects.outputs.ver }}-py3-none-any.whl
-            dist/starshield_forensics-${{ steps.subjects.outputs.ver }}.tar.gz
-          sbom-path: dist/starshield-forensics-${{ steps.subjects.outputs.ver }}.spdx.json
+          {
+            echo "subjects_b64=${B64}"
+            echo "release_tag=${TAG}"
+            echo "ver=${VER}"
+            echo "pyz_sha256=${PYZ_SHA}"
+            echo "wheel_sha256=${WHL_SHA}"
+            echo "sdist_sha256=${SDIST_SHA}"
+            echo "sbom_sha256=${SBOM_SHA}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Upload deterministic SPDX 2.3 SBOM workflow artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -126,15 +151,66 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  attest-provenance:
+    needs: [build-and-verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Fetch release artifacts and enforce exact runner-built SHA-256 digests (zero repo code execution)
+        env:
+          TAG: ${{ needs.build-and-verify.outputs.release_tag }}
+          VER: ${{ needs.build-and-verify.outputs.ver }}
+          PYZ_SHA: ${{ needs.build-and-verify.outputs.pyz_sha256 }}
+          WHL_SHA: ${{ needs.build-and-verify.outputs.wheel_sha256 }}
+          SDIST_SHA: ${{ needs.build-and-verify.outputs.sdist_sha256 }}
+          SBOM_SHA: ${{ needs.build-and-verify.outputs.sbom_sha256 }}
+        run: |
+          set -euo pipefail
+          BASE_URL="https://github.com/Ziqi/starshield-forensics/releases/download/${TAG}"
+          WHL_NAME="starshield_forensics-${VER}-py3-none-any.whl"
+          SDIST_NAME="starshield_forensics-${VER}.tar.gz"
+          SBOM_NAME="starshield-forensics-${VER}.spdx.json"
+          mkdir -p dist
+          curl -fsSL -o dist/starshield.pyz "${BASE_URL}/starshield.pyz"
+          curl -fsSL -o "dist/${WHL_NAME}" "${BASE_URL}/${WHL_NAME}"
+          curl -fsSL -o "dist/${SDIST_NAME}" "${BASE_URL}/${SDIST_NAME}"
+          curl -fsSL -o "dist/${SBOM_NAME}" "${BASE_URL}/${SBOM_NAME}"
+          printf '%s  %s\n' \
+            "${PYZ_SHA}" "dist/starshield.pyz" \
+            "${WHL_SHA}" "dist/${WHL_NAME}" \
+            "${SDIST_SHA}" "dist/${SDIST_NAME}" \
+            "${SBOM_SHA}" "dist/${SBOM_NAME}" | sha256sum -c -
+
+      - name: Attest runner-verified artifact provenance (Sigstore Fulcio + Rekor)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/starshield.pyz
+            dist/starshield_forensics-${{ needs.build-and-verify.outputs.ver }}-py3-none-any.whl
+            dist/starshield_forensics-${{ needs.build-and-verify.outputs.ver }}.tar.gz
+            dist/starshield-forensics-${{ needs.build-and-verify.outputs.ver }}.spdx.json
+
+      - name: Attest SPDX 2.3 SBOM (Sigstore Fulcio + Rekor)
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: |
+            dist/starshield.pyz
+            dist/starshield_forensics-${{ needs.build-and-verify.outputs.ver }}-py3-none-any.whl
+            dist/starshield_forensics-${{ needs.build-and-verify.outputs.ver }}.tar.gz
+          sbom-path: dist/starshield-forensics-${{ needs.build-and-verify.outputs.ver }}.spdx.json
+
   slsa3-provenance:
-    needs: [build-and-attest]
+    needs: [build-and-verify, attest-provenance]
     permissions:
       actions: read
       id-token: write
       contents: write
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
-      base64-subjects: "${{ needs.build-and-attest.outputs.subjects_b64 }}"
+      base64-subjects: "${{ needs.build-and-verify.outputs.subjects_b64 }}"
       upload-assets: true
-      upload-tag-name: "${{ needs.build-and-attest.outputs.release_tag }}"
+      upload-tag-name: "${{ needs.build-and-verify.outputs.release_tag }}"
       provenance-name: "multiple.intoto.jsonl"

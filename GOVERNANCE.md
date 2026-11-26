@@ -5,7 +5,7 @@
 `starshield-forensics` uses an open, meritocratic **Lead Maintainer** governance model appropriate for a clean-room digital forensics library:
 
 - **Decision Making:** Architectural changes, wire-format parser expansions, epistemic boundary definitions, and release cuts are reviewed publicly via GitHub Pull Requests and Issues at <https://github.com/Ziqi/starshield-forensics>.
-- **Consensus & Escalation:** Proposed changes remain open for technical review and automated CI verification (unit tests, adversarial boundary suite, `StarShield-Bench-24`, `coverage.py >= 80%`, `Ruff`, and `Bandit`). Where trade-offs arise between feature breadth and evidentiary determinism or zero-dependency portability, **determinism, memory bounds, and stdlib-only isolation** take precedence.
+- **Consensus & Escalation:** Proposed changes remain open for technical review and automated CI verification (unit tests, adversarial boundary suite, `StarShield-Bench-24`, `coverage.py >= 85%`, `Ruff`, and `Bandit`). Where trade-offs arise between feature breadth and evidentiary determinism or zero-dependency portability, **determinism, memory bounds, and stdlib-only isolation** take precedence.
 
 ## 2. Roles & Responsibilities
 

@@ -59,6 +59,7 @@ from starshield.ioc_validators import (
 from starshield.leveldb_log import (
     VALID_SCHEMA_MODES,
     SafeDiagnosticError,
+    _collect_ioc_scalars,
     build_writebatch,
     classify_carved_json_object,
     dumps_strict_json,
@@ -269,12 +270,20 @@ def apply_wal_record_redaction(
                     if rec.get("sender_mri")
                     else ""
                 )
+                if "storage_origin" in rec:
+                    rec["storage_origin"] = (
+                        pseudonymizer.assign("ORIGIN", str(rec["storage_origin"]))
+                        if rec.get("storage_origin")
+                        else ""
+                    )
                 rec["extracted_currency_amounts"] = extract_currency_amounts(raw_txt)
                 rec["cached_content"] = (
                     "[WITHHELD_IN_STRUCTURAL_MCP_MODE — free-form prose withheld by default]"
                 )
             else:
                 rec["sender_mri"] = mask_identifier(str(rec.get("sender_mri") or ""), salt=run_salt)
+                if "storage_origin" in rec:
+                    rec["storage_origin"] = mask_identifier(str(rec.get("storage_origin") or ""), salt=run_salt)
                 rec["cached_content"] = "[REDACTED_CONTENT]"
             rec["composetime"] = redact_timestamp(rec.get("composetime"))
             rec["deletetime"] = redact_timestamp(rec.get("deletetime"))
@@ -333,7 +342,7 @@ def apply_image_redaction(
 
 
 def triage_exported_chatsvc_json(
-    payload: Dict[str, Any],
+    payload: Dict[str, Any] | List[Any],
     redact: bool = True,
     salt: bytes | None = None,
     schema_mode: str = "auto",
@@ -341,25 +350,54 @@ def triage_exported_chatsvc_json(
 ) -> Dict[str, Any]:
     if schema_mode not in VALID_SCHEMA_MODES:
         raise SafeDiagnosticError("Unsupported schema_mode requested")
-    if not isinstance(payload, dict):
-        raise SafeDiagnosticError("Expected JSON object containing a 'messages' or 'records' list")
 
-    if "messages" in payload:
-        messages = payload.get("messages")
-        if not isinstance(messages, list):
-            raise SafeDiagnosticError("Expected 'messages' to be a JSON list")
-    elif "records" in payload:
-        messages = payload.get("records")
-        if not isinstance(messages, list):
-            raise SafeDiagnosticError("Expected 'records' to be a JSON list")
+    messages: List[Any] = []
+    if isinstance(payload, list):
+        if not payload or not all(isinstance(x, dict) for x in payload):
+            raise SafeDiagnosticError(
+                "Expected non-empty JSON array of message objects or JSON object containing 'messages', 'records', or 'conversations'"
+            )
+        messages = payload
+    elif isinstance(payload, dict):
+        matched_container = False
+        if "messages" in payload:
+            matched_container = True
+            raw_msgs = payload.get("messages")
+            if not isinstance(raw_msgs, list):
+                raise SafeDiagnosticError("Expected 'messages' to be a JSON list")
+            messages.extend(raw_msgs)
+        if "records" in payload:
+            matched_container = True
+            raw_recs = payload.get("records")
+            if not isinstance(raw_recs, list):
+                raise SafeDiagnosticError("Expected 'records' to be a JSON list")
+            messages.extend(raw_recs)
+        if "conversations" in payload:
+            matched_container = True
+            convs = payload.get("conversations")
+            if not isinstance(convs, list):
+                raise SafeDiagnosticError("Expected 'conversations' to be a JSON list")
+            for conv in convs:
+                if not isinstance(conv, dict):
+                    continue
+                conv_msgs = conv.get("MessageList")
+                if conv_msgs is None:
+                    conv_msgs = conv.get("messages")
+                if isinstance(conv_msgs, list):
+                    messages.extend(conv_msgs)
+        if not matched_container:
+            messages = []
     else:
-        messages = []
+        raise SafeDiagnosticError(
+            "Expected JSON array or object containing 'messages', 'records', or 'conversations'"
+        )
 
     run_salt = DEFAULT_EPHEMERAL_SALT if salt is None else salt
     retracted: List[Dict[str, Any]] = []
     edited: List[Dict[str, Any]] = []
     corpus_iocs = empty_ioc_dict()
     corpus_seen: Dict[str, set[Any]] = {}
+    any_scalar_truncated = False
 
     for msg in messages:
         if not isinstance(msg, dict):
@@ -369,11 +407,16 @@ def triage_exported_chatsvc_json(
             continue
         norm = normalize_carved_record_fields(msg, schema_tag or "generic_json")
         body = strip_markup(norm["cached_content"])
-        # Extract IOCs strictly PER MESSAGE so cross-message numbers never pair!
+        raw_scalars, msg_trunc = _collect_ioc_scalars(msg, cap=4096, max_chars=262_144)
+        if msg_trunc:
+            any_scalar_truncated = True
+        extra_scalars = [strip_markup(s) for s in raw_scalars]
+        full_msg_scan = body + ("\n" + "\n".join(s for s in extra_scalars if s and s not in body) if extra_scalars else "")
+        # Extract IOCs strictly PER MESSAGE across both body and structured fields without cross-message pairing!
         if redact and pseudonymizer is not None:
-            msg_iocs = pseudonymizer.pseudonymize_iocs_from_text(body)
+            msg_iocs = pseudonymizer.pseudonymize_iocs_from_text(full_msg_scan)
         else:
-            msg_iocs = extract_validated_iocs(body, redact=redact, salt=run_salt)
+            msg_iocs = extract_validated_iocs(full_msg_scan, redact=redact, salt=run_salt)
         merge_ioc_dicts(corpus_iocs, msg_iocs, seen_cache=corpus_seen)
 
         delete_ts = norm["deletetime"]
@@ -424,12 +467,13 @@ def triage_exported_chatsvc_json(
                 }
             )
 
-    return {
+    triage_out: Dict[str, Any] = {
         "input_mode": "exported_message_json",
         "schema_mode": schema_mode,
         "messages_present_in_input": len(messages),
         "soft_deleted_messages_in_input": len(retracted),
         "edited_messages_in_input": len(edited),
+        "structured_field_scan_truncated": any_scalar_truncated,
         "completeness_caveat": (
             "Counts reflect records present in the supplied export only; already compacted "
             "or garbage-collected LevelDB records cannot be enumerated from client cache alone."
@@ -439,6 +483,7 @@ def triage_exported_chatsvc_json(
         "corpus_validated_iocs": corpus_iocs,
         "ioc_validation_scope_note": VALIDATION_SCOPE_NOTE,
     }
+    return triage_out
 
 
 def corroborate_timestamps(
@@ -746,10 +791,34 @@ def _guard_vault_not_same_file(vault_file: Path | None, input_file: Path | None)
         )
 
     dir_targets = [s for s in (st_i_lstat, st_i_stat) if s is not None and stat.S_ISDIR(s.st_mode)]
+    if not dir_targets:
+        clean_in_name = in_target.name.rstrip(" .")
+        is_numbered_ldb_file = bool(re.match(r"^[0-9]+\.(?:log|ldb|sst)$", clean_in_name, re.IGNORECASE))
+        in_parent = in_target.parent
+        parent_has_ldb_markers = False
+        if not is_numbered_ldb_file and in_parent.is_dir():
+            try:
+                for entry in os.scandir(in_parent):
+                    en = entry.name.rstrip(" .")
+                    if en.upper() in ("CURRENT", "LOCK") or en.upper().startswith("MANIFEST-"):
+                        parent_has_ldb_markers = True
+                        break
+                    if en.lower().endswith((".ldb", ".sst")):
+                        parent_has_ldb_markers = True
+                        break
+            except OSError:
+                parent_has_ldb_markers = False
+        if is_numbered_ldb_file or parent_has_ldb_markers:
+            try:
+                dir_targets.append(os.stat(in_parent))
+            except OSError:
+                pass
+
     if dir_targets:
-        anc = Path(os.path.abspath(os.path.expanduser(str(vault_file))))
+        raw_v = Path(os.path.expanduser(str(vault_file)))
+        anc = raw_v if raw_v.is_absolute() else (Path(os.getcwd()) / raw_v)
         deepest_existing: Path | None = None
-        probe = anc
+        probe = anc.parent
         while True:
             try:
                 os.stat(probe)
@@ -826,13 +895,18 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument(
         "--pseudonymize",
         action="store_true",
-        help="Emit structural skeleton with session-tagged placeholders (<IBAN_GB_9F3A_01>, <ENTITY_9F3A_01>) while withholding raw prose",
+        help="Emit structural skeleton with session-tagged placeholders (<IBAN_GB_9F3AC41D_01>, <ENTITY_9F3AC41D_01>) while withholding raw prose",
     )
     parser.add_argument(
         "--vault-file",
         type=Path,
         default=None,
         help="Persist local 0600 reverse token vault JSON (prefer /dev/shm) for offline `starshield detokenize` (implies --pseudonymize)",
+    )
+    parser.add_argument(
+        "--vault-overwrite",
+        action="store_true",
+        help="Explicitly allow replacing an existing starshield-token-vault/v1 file created by a prior session",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -897,7 +971,7 @@ def main(argv: List[str] | None = None) -> int:
 
     p_detok = sub.add_parser(
         "detokenize",
-        help="Locally restore <IBAN_GB_9F3A_01>/<TRC20_9F3A_01>/<ENTITY_9F3A_01> placeholders using a 0600 token vault file",
+        help="Locally restore <IBAN_GB_9F3AC41D_01>/<TRC20_9F3AC41D_01>/<ENTITY_9F3AC41D_01> placeholders using a 0600 token vault file",
     )
     p_detok.add_argument("--vault", required=True, type=Path, help="Path to local starshield-token-vault/v1 JSON file")
     p_detok.add_argument("--input", type=Path, default=None, help="Optional input text/markdown/JSON file to detokenize")
@@ -929,6 +1003,22 @@ def main(argv: List[str] | None = None) -> int:
     set_active_hmac_digest(args.hmac_digest)
 
     try:
+        if args.unredacted and (args.pseudonymize or args.vault_file is not None or args.vault_overwrite):
+            raise SafeDiagnosticError("--unredacted cannot be combined with --pseudonymize or --vault-file")
+        if (args.pseudonymize or args.vault_file is not None or args.vault_overwrite) and args.command not in (
+            "parse-leveldb-log",
+            "parse-leveldb-store",
+            "triage-json",
+            "mcp",
+        ):
+            raise SafeDiagnosticError(
+                f"--pseudonymize / --vault-file is only supported by tokenizing subcommands "
+                f"(parse-leveldb-log, parse-leveldb-store, triage-json, mcp), not '{args.command}'"
+            )
+        if args.unredacted and args.command != "mcp":
+            sys.stderr.write(
+                "[starshield] WARNING: --unredacted lab mode active; privacy airlock disabled.\n"
+            )
         if args.hmac_key_file is not None:
             _guard_vault_not_same_file(args.vault_file, args.hmac_key_file)
             raw_key = read_bounded_bytes(args.hmac_key_file, max_mb=1, redact=redact).strip()
@@ -962,7 +1052,7 @@ def main(argv: List[str] | None = None) -> int:
                 pseudonymizer=pseudo,
             )
             if pseudo is not None and args.vault_file is not None:
-                pseudo.save_vault_atomic(args.vault_file)
+                pseudo.save_vault_atomic(args.vault_file, allow_overwrite=args.vault_overwrite)
             out = {
                 "acquisition_manifest": build_acquisition_manifest(raw, args.log_file.name, redact=redact),
                 "leveldb_wal_analysis": parsed,
@@ -991,7 +1081,7 @@ def main(argv: List[str] | None = None) -> int:
                 pseudonymizer=pseudo,
             )
             if pseudo is not None and args.vault_file is not None:
-                pseudo.save_vault_atomic(args.vault_file)
+                pseudo.save_vault_atomic(args.vault_file, allow_overwrite=args.vault_overwrite)
             out = {
                 "leveldb_store_analysis": redacted_store,
             }
@@ -1016,7 +1106,7 @@ def main(argv: List[str] | None = None) -> int:
                 pseudonymizer=pseudo,
             )
             if pseudo is not None and args.vault_file is not None:
-                pseudo.save_vault_atomic(args.vault_file)
+                pseudo.save_vault_atomic(args.vault_file, allow_overwrite=args.vault_overwrite)
             out = {
                 "acquisition_manifest": build_acquisition_manifest(raw, args.json_file.name, redact=redact),
                 "triage_result": triaged,
@@ -1083,7 +1173,9 @@ def main(argv: List[str] | None = None) -> int:
             return 0
 
         if args.command == "detokenize":
-            _guard_vault_not_same_file(args.vault_file, args.input)
+            _guard_vault_not_same_file(args.vault, args.input)
+            if args.vault_file is not None:
+                _guard_vault_not_same_file(args.vault_file, args.input)
             mapping, vault_tag = load_vault_strict(args.vault)
             if args.text is not None:
                 src_text = sanitize_utf8_str(args.text)
@@ -1109,7 +1201,7 @@ def main(argv: List[str] | None = None) -> int:
             }
             if unmatched:
                 detok_out["cross_session_warning"] = (
-                    f"Left {len(unmatched)} placeholder(s) unexpanded because their 4-hex session tag "
+                    f"Left {len(unmatched)} placeholder(s) unexpanded because their session tag "
                     f"did not match vault session_tag '{vault_tag}' or was absent from vault."
                 )
             print(dumps_strict_json(detok_out, indent=2))
@@ -1129,6 +1221,7 @@ def main(argv: List[str] | None = None) -> int:
                 max_mb=args.max_mb,
                 salt=run_salt,
                 vault_file=args.vault_file,
+                allow_vault_overwrite=args.vault_overwrite,
             )
     except (
         OSError,

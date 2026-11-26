@@ -9,9 +9,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY --chown=65532:65532 LICENSE README.md pyproject.toml /app/
-COPY --chown=65532:65532 starshield /app/starshield
+COPY --chown=0:0 LICENSE README.md pyproject.toml /app/
+COPY --chown=0:0 starshield /app/starshield
 
 USER 65532:65532
 
-ENTRYPOINT ["python3", "-m", "starshield.cli", "mcp"]
+ENTRYPOINT ["python3", "-P", "-s", "-m", "starshield.cli", "mcp"]

@@ -50,11 +50,14 @@ MAX_CORRUPTED_RECORDS_REPORTED = 256  # Output-amplification cap on corrupted_fr
 MAX_WAL_RECOVERED_RECORDS = 100_000  # Memory-amplification cap on recovered JSON records per WAL
 MAX_JSON_INT_DIGITS = 64  # Bounded JSON integer digit cap preventing >4300-digit conversion errors
 MAX_CARVE_DECODE_HEIGHT = 400  # Max balanced `{...}` height passed to CPython recursive raw_decode
+MAX_KV_TEXT_CHARS = 512
 LEVELDB_SSTABLE_MAGIC_LE = struct.pack("<Q", 0xDB4775248B80FB57)
 SQLITE3_HEADER_MAGIC = b"SQLite format 3\x00"
 _LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 _JSON_OBJ_START_RE = re.compile(r'\{[ \t\r\n]*"')
 _JSON_CARVE_SCAN_RE = re.compile(r'"(?:[^"\\\x00-\x1f]|\\.)*"|(?<![.0-9eE+-])[0-9]{65,}(?![.eE])|["{}]')
+_MANIFEST_NAME_RE = re.compile(r"^MANIFEST-([0-9]+)$", re.IGNORECASE)
+_PRINTABLE_CTRL_OK = frozenset({9, 10, 13})
 
 
 def sanitize_utf8_str(val: str) -> str:
@@ -393,6 +396,132 @@ def decode_varint(buf: bytes, pos: int) -> Tuple[int, int]:
     raise ValueError("Truncated varint")
 
 
+def is_blink_v8_serialized_value(buf: bytes) -> bool:
+    """
+    Detect Blink / V8 `SerializedScriptValue` headers (`0xFF + wire_version`, `0x00 0xFF <ver> 0xFF`,
+    or 1..2 leading Chromium IndexedDB varints followed by `0xFF + wire_version`).
+    """
+    if not buf:
+        return False
+    if buf[0] == 0xFF:
+        return len(buf) >= 2 and (0x09 <= buf[1] <= 0x40 or buf[1] == 0xFF)
+    if buf[0] == 0x00:
+        return (
+            len(buf) >= 4
+            and buf[1] == 0xFF
+            and 0x09 <= buf[2] <= 0x28
+            and buf[3] == 0xFF
+        )
+    pos = 0
+    for _hop in range(2):
+        try:
+            _v, pos = decode_varint(buf, pos)
+        except ValueError:
+            return False
+        if pos > 8 or pos + 2 > len(buf):
+            return False
+        if buf[pos] == 0xFF and (0x09 <= buf[pos + 1] <= 0x40 or buf[pos + 1] == 0xFF):
+            return True
+        if pos + 3 <= len(buf) and buf[pos : pos + 2] == b"\x00\xff" and 0x09 <= buf[pos + 2] <= 0x40:
+            return True
+    return False
+
+
+def _is_chromium_domstorage_key(user_key: bytes) -> bool:
+    """Identify Chromium DOMStorage / LocalStorage keys (`_<origin>\\x00<tag><key>` or `META:<origin>`)."""
+    if user_key.startswith(b"META:") and len(user_key) > 5:
+        return True
+    if not user_key.startswith(b"_"):
+        return False
+    sep = user_key.find(b"\x00", 1)
+    if sep <= 1 or sep + 1 >= len(user_key):
+        return False
+    origin_part = user_key[1:sep]
+    return b"://" in origin_part or origin_part in (b"null", b"file://")
+
+
+def _decode_chromium_string_prefixed(buf: bytes, *, allow_single_char: bool = False) -> str | None:
+    """
+    Decode Chromium LocalStorage / DOMStorage value or key segment (`\\x01` UTF-8/Latin-1,
+    `\\x00` UTF-16LE, or clean printable UTF-8) while rejecting binary Blink V8 `0xFF` blobs.
+    """
+    if not buf or is_blink_v8_serialized_value(buf):
+        return None
+
+    cand: str | None = None
+    prefixed = False
+    if buf[0] == 0x01 and len(buf) > 1:
+        prefixed = True
+        try:
+            cand = buf[1:].decode("utf-8")
+        except UnicodeDecodeError:
+            cand = buf[1:].decode("latin-1")
+    elif buf[0] == 0x00 and len(buf) >= 3 and (len(buf) - 1) % 2 == 0:
+        prefixed = True
+        try:
+            cand = buf[1:].decode("utf-16-le")
+        except UnicodeDecodeError:
+            cand = None
+    else:
+        try:
+            cand = buf.decode("utf-8")
+        except UnicodeDecodeError:
+            cand = None
+
+    if not cand:
+        return None
+    cleaned = sanitize_utf8_str(cand).strip("\x00 \t\r\n")
+    min_chars = 1 if (prefixed or allow_single_char) else 2
+    if len(cleaned) < min_chars:
+        return None
+    printable = sum(1 for ch in cleaned if ch.isprintable() or ord(ch) in _PRINTABLE_CTRL_OK)
+    if printable / len(cleaned) < 0.85:
+        return None
+    return cleaned[:MAX_KV_TEXT_CHARS]
+
+
+def _extract_lightweight_kv_record(user_key: bytes, val_bytes: bytes) -> Dict[str, Any] | None:
+    """
+    Lightweight non-V8-AST key-value string extractor covering Chromium LocalStorage
+    `_<origin>\\x00\\x01<key>` (in `auto` & `generic-json`) and plaintext KV entries (`generic-json`).
+    """
+    val_txt = _decode_chromium_string_prefixed(val_bytes)
+    if not val_txt:
+        return None
+
+    origin_str = ""
+    key_label = ""
+    if user_key.startswith(b"_") and b"\x00" in user_key[1:]:
+        sep = user_key.index(b"\x00", 1)
+        origin_raw = user_key[1:sep]
+        rest_key = user_key[sep + 1 :]
+        origin_str = origin_raw.decode("utf-8", errors="ignore").strip()
+        key_label = (
+            _decode_chromium_string_prefixed(rest_key, allow_single_char=True)
+            or rest_key.lstrip(b"\x00\x01").decode("utf-8", errors="ignore").strip()
+        )
+    elif user_key.startswith(b"META:") and len(user_key) > 5:
+        origin_str = user_key[5:].decode("utf-8", errors="ignore").strip()
+        key_label = "META"
+    else:
+        key_label = _decode_chromium_string_prefixed(user_key, allow_single_char=True) or ""
+
+    if not key_label:
+        key_label = f"key_{hashlib.sha256(user_key).hexdigest()[:12]}"
+
+    rec: Dict[str, Any] = {
+        "message_id": key_label[:128],
+        "sender_mri": "",
+        "composetime": None,
+        "deletetime": None,
+        "edittime": None,
+        "cached_content": f"{key_label}: {val_txt}" if key_label else val_txt,
+    }
+    if origin_str:
+        rec["storage_origin"] = origin_str[:128]
+    return rec
+
+
 def build_writebatch(sequence: int, operations: List[Tuple[int, bytes, bytes]]) -> bytes:
     """Build a spec-compliant LevelDB WriteBatch payload for fixtures & tests."""
     body = bytearray(struct.pack("<QI", sequence, len(operations)))
@@ -547,6 +676,39 @@ def classify_carved_json_object(obj: Any, schema_mode: str = "auto") -> str | No
     return None
 
 
+_NON_IOC_METADATA_KEYS = frozenset(
+    {
+        "blob_pad",
+        "avatar",
+        "thumbnail",
+        "raw_html",
+        "id",
+        "message_id",
+        "messageid",
+        "clientmessageid",
+        "client_msg_id",
+        "conversationid",
+        "threadid",
+        "channel_id",
+        "team_id",
+        "user_id",
+        "ts",
+        "thread_ts",
+        "latest_reply",
+        "composetime",
+        "originalarrivaltime",
+        "edittime",
+        "deletetime",
+        "created_at",
+        "updated_at",
+        "timestamp",
+        "version",
+        "sequence",
+        "seq",
+    }
+)
+
+
 def _collect_string_scalars(node: Any, cap: int = 64) -> List[str]:
     """Iteratively collect bounded string/number leaves for generic-json IOC & content normalization."""
     acc: List[str] = []
@@ -584,6 +746,67 @@ def _collect_string_scalars(node: Any, cap: int = 64) -> List[str]:
         elif isinstance(cur, list):
             work.extend(reversed(cur))
     return acc
+
+
+def _collect_ioc_scalars(
+    node: Any,
+    *,
+    cap: int = 4096,
+    max_chars: int = 262_144,
+) -> Tuple[List[str], bool]:
+    """
+    Collect structured scalar values for per-message IOC extraction while excluding synthetic
+    message-ID / epoch-timestamp metadata keys (`clientmessageid`, `ts`, etc.) and reporting
+    whether `cap` or `max_chars` truncated traversal.
+    """
+    acc: List[str] = []
+    total_chars = 0
+    truncated = False
+    work: List[Any] = [node]
+    while work:
+        if len(acc) >= cap or total_chars >= max_chars:
+            truncated = True
+            break
+        cur = work.pop()
+        if cur is None or isinstance(cur, bool):
+            continue
+        if isinstance(cur, str):
+            s = cur.strip()
+            if s:
+                acc.append(s)
+                total_chars += len(s)
+        elif isinstance(cur, (int, float)):
+            if not (isinstance(cur, float) and (math.isnan(cur) or math.isinf(cur))):
+                s_num = str(cur)
+                acc.append(s_num)
+                total_chars += len(s_num)
+        elif isinstance(cur, dict):
+            nested_children: List[Any] = []
+            keys_sorted = sorted(cur.keys(), key=str)
+            for idx_k, k in enumerate(keys_sorted):
+                kl = str(k).lower()
+                if kl in _NON_IOC_METADATA_KEYS:
+                    continue
+                v = cur[k]
+                if isinstance(v, (str, int, float)) and not isinstance(v, bool):
+                    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                        continue
+                    vs = str(v).strip()
+                    if vs:
+                        item_s = f"{k}: {vs}"
+                        acc.append(item_s)
+                        total_chars += len(item_s)
+                        if len(acc) >= cap or total_chars >= max_chars:
+                            if idx_k + 1 < len(keys_sorted) or nested_children or work:
+                                truncated = True
+                            break
+                else:
+                    nested_children.append(v)
+            if not truncated and nested_children:
+                work.extend(reversed(nested_children))
+        elif isinstance(cur, list):
+            work.extend(reversed(cur))
+    return acc, truncated
 
 
 def _clean_ts_field(val: Any) -> Any:
@@ -629,7 +852,18 @@ def normalize_carved_record_fields(obj: Dict[str, Any], schema_tag: str) -> Dict
             break
 
     sender = ""
-    for k in ("from", "user", "sender", "author", "actor", "vendor", "supplier", "beneficiary"):
+    for k in (
+        "from",
+        "imdisplayname",
+        "displayname",
+        "user",
+        "sender",
+        "author",
+        "actor",
+        "vendor",
+        "supplier",
+        "beneficiary",
+    ):
         v = _get_ci(obj, lower_map, k)
         if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
             continue
@@ -638,7 +872,7 @@ def normalize_carved_record_fields(obj: Dict[str, Any], schema_tag: str) -> Dict
             break
 
     compose_ts = None
-    for k in ("composetime", "ts", "t", "timestamp", "created_at", "issued_at", "date"):
+    for k in ("composetime", "originalarrivaltime", "ts", "t", "timestamp", "created_at", "issued_at", "date"):
         cand = _clean_ts_field(_get_ci(obj, lower_map, k))
         if cand not in (None, ""):
             compose_ts = cand
@@ -670,6 +904,16 @@ def normalize_carved_record_fields(obj: Dict[str, Any], schema_tag: str) -> Dict
             content_str = ""
         else:
             content_str = sanitize_utf8_str(str(raw_c))
+        extra_chat_leaves: List[str] = []
+        for sub_k in ("cards", "attachments"):
+            sub_v = _get_ci(props, props_low, sub_k)
+            if sub_v is None:
+                sub_v = _get_ci(obj, lower_map, sub_k)
+            if isinstance(sub_v, (dict, list)) and sub_v:
+                extra_chat_leaves.extend(_collect_string_scalars(sub_v, cap=64))
+        if extra_chat_leaves:
+            ext_txt = sanitize_utf8_str(" | ".join(extra_chat_leaves))
+            content_str = f"{content_str} | {ext_txt}" if content_str else ext_txt
     else:
         primary_parts: List[str] = []
         for k in ("content", "text", "body", "message", "payment_instructions", "memo", "note", "description"):
@@ -705,6 +949,36 @@ def normalize_carved_record_fields(obj: Dict[str, Any], schema_tag: str) -> Dict
                 continue
             if v is not None and str(v).strip():
                 primary_parts.append(f"{k}={sanitize_utf8_str(str(v).strip())}")
+        # Also include nested container fields (e.g. Slack `blocks`/`attachments` or nested `wire_details`)
+        envelope_skip = {
+            "id",
+            "from",
+            "user",
+            "sender",
+            "author",
+            "ts",
+            "t",
+            "timestamp",
+            "composetime",
+            "originalarrivaltime",
+            "deletetime",
+            "deleted_ts",
+            "edittime",
+            "edited",
+            "properties",
+            "blob_pad",
+            "avatar",
+            "thumbnail",
+            "raw_html",
+        }
+        for raw_ok, raw_ov in obj.items():
+            if str(raw_ok).lower() in envelope_skip:
+                continue
+            if isinstance(raw_ov, (dict, list)) and raw_ov:
+                for leaf in _collect_string_scalars(raw_ov, cap=64):
+                    clean_leaf = sanitize_utf8_str(leaf)
+                    if clean_leaf and clean_leaf not in primary_parts:
+                        primary_parts.append(clean_leaf)
         if primary_parts:
             content_str = " | ".join(primary_parts)
         else:
@@ -746,9 +1020,20 @@ def _extract_json_objects_from_bytes(
     """
     if max_objects <= 0:
         return []
-    candidates: List[str] = [raw_val.decode("utf-8", errors="ignore")]
+    candidates: List[str] = []
+    u8_txt = raw_val.decode("utf-8", errors="ignore")
+    if "{" in u8_txt:
+        candidates.append(u8_txt)
     if b"\x00" in raw_val:
-        candidates.append(raw_val.decode("utf-16-le", errors="ignore"))
+        even_u16 = raw_val.decode("utf-16-le", errors="ignore")
+        if "{" in even_u16:
+            candidates.append(even_u16)
+        if len(raw_val) >= 3:
+            odd_u16 = raw_val[1:].decode("utf-16-le", errors="ignore")
+            if "{" in odd_u16:
+                candidates.append(odd_u16)
+    if not candidates:
+        return []
 
     decoder = json.JSONDecoder(parse_int=_bounded_carve_int)
     found: List[Tuple[Dict[str, Any], str]] = []
@@ -1049,7 +1334,12 @@ def iter_leveldb_logical_records(
     return logical_out, physical_records_ok, corrupted_records, corrupted_total_count
 
 
-def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, Any]:
+def parse_leveldb_wal(
+    raw_bytes: bytes,
+    schema_mode: str = "auto",
+    *,
+    probe_generic_fallback: bool = False,
+) -> Dict[str, Any]:
     """Parse a Chromium LevelDB `.log` file, verifying CRC32C, WriteBatch bounds, and EOF completeness."""
     if schema_mode not in VALID_SCHEMA_MODES:
         raise ValueError(f"Unsupported schema_mode={schema_mode!r}; expected one of {VALID_SCHEMA_MODES}")
@@ -1063,6 +1353,7 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
         "tombstone_ops_total": 0,
         "blink_v8_binary_only_values": 0,
         "recovered_truncated": 0,
+        "generic_fallback_records": 0,
     }
     tombstones_by_key_hash: Dict[str, int] = {}
 
@@ -1076,6 +1367,7 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
             schema_mode=schema_mode,
             stats=stats,
             tombstones_by_key_hash=tombstones_by_key_hash,
+            probe_generic_fallback=probe_generic_fallback,
         )
         for c_item in batch_corrupt:
             corrupted_total_count += 1
@@ -1094,7 +1386,7 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
             rec["superseded_by_wal_tombstone"] = False
 
     chatsvc_count = sum(1 for r in recovered_entries if r.get("schema_detected") == "chatsvc")
-    return {
+    res_wal: Dict[str, Any] = {
         "parser": f"leveldb_wal_32k_crc32c_v{__version__}",
         "schema_mode": schema_mode,
         "file_size_bytes": len(raw_bytes),
@@ -1110,6 +1402,9 @@ def parse_leveldb_wal(raw_bytes: bytes, schema_mode: str = "auto") -> Dict[str, 
         "recovered_chatsvc_records_count": chatsvc_count,
         "recovered_records": recovered_entries,
     }
+    if probe_generic_fallback:
+        res_wal["generic_fallback_records_count"] = stats["generic_fallback_records"]
+    return res_wal
 
 
 def _decode_writebatch_into(
@@ -1120,6 +1415,8 @@ def _decode_writebatch_into(
     schema_mode: str = "auto",
     stats: Dict[str, int] | None = None,
     tombstones_by_key_hash: Dict[str, int] | None = None,
+    *,
+    probe_generic_fallback: bool = False,
 ) -> None:
     if len(batch) < 12:
         corrupted.append({"byte_offset": logical_offset, "reason": "WriteBatch shorter than 12-byte header"})
@@ -1133,6 +1430,7 @@ def _decode_writebatch_into(
     local_value_ops = 0
     local_tombstone_ops = 0
     local_v8_binary_only = 0
+    local_generic_fallback = 0
     local_truncated = False
 
     try:
@@ -1160,40 +1458,64 @@ def _decode_writebatch_into(
                     carved_objs = _extract_json_objects_from_bytes(
                         val_bytes, schema_mode=schema_mode, max_objects=rem_cap + 1
                     )
+                    is_dom_key = _is_chromium_domstorage_key(key_bytes)
+                    if not carved_objs and schema_mode == "auto" and is_dom_key:
+                        carved_objs = _extract_json_objects_from_bytes(
+                            val_bytes, schema_mode="generic-json", max_objects=rem_cap + 1
+                        )
                     if len(carved_objs) > rem_cap:
                         carved_objs = carved_objs[:rem_cap]
                         local_truncated = True
-                    if not carved_objs and (val_bytes.startswith(b"\xff") or val_bytes.startswith(b"\x00\xff")):
+
+                    norm_pairs: List[Tuple[Dict[str, Any], str]] = [
+                        (normalize_carved_record_fields(obj, schema_tag), schema_tag)
+                        for obj, schema_tag in carved_objs
+                    ]
+                    if not norm_pairs and (schema_mode == "generic-json" or (schema_mode == "auto" and is_dom_key)):
+                        kv_rec = _extract_lightweight_kv_record(key_bytes, val_bytes)
+                        if kv_rec is not None:
+                            norm_pairs.append((kv_rec, "localstorage_kv_text"))
+
+                    if not norm_pairs and probe_generic_fallback and schema_mode == "auto" and not is_dom_key:
+                        gen_objs = _extract_json_objects_from_bytes(
+                            val_bytes, schema_mode="generic-json", max_objects=64
+                        )
+                        if gen_objs:
+                            local_generic_fallback += len(gen_objs)
+                        elif _extract_lightweight_kv_record(key_bytes, val_bytes) is not None:
+                            local_generic_fallback += 1
+
+                    if not norm_pairs and is_blink_v8_serialized_value(val_bytes):
                         local_v8_binary_only += 1
 
-                    for obj, schema_tag in carved_objs:
-                        norm = normalize_carved_record_fields(obj, schema_tag)
+                    for norm, schema_tag in norm_pairs:
                         del_ts = norm["deletetime"]
                         edit_ts = norm["edittime"]
-                        staged_entries.append(
-                            {
-                                "epistemic_tier": "OBSERVED",
-                                "schema_detected": schema_tag,
-                                "leveldb_batch_byte_offset": logical_offset,
-                                "leveldb_batch_sequence_number": seq_num,
-                                "leveldb_sequence_number": seq_num + parsed_ops,
-                                "key_sha256": hashlib.sha256(key_bytes).hexdigest(),
-                                "value_sha256": hashlib.sha256(val_bytes).hexdigest(),
-                                "message_id": norm["message_id"],
-                                "sender_mri": norm["sender_mri"],
-                                "composetime": norm["composetime"],
-                                "deletetime": del_ts,
-                                "edittime": edit_ts,
-                                "is_soft_deleted_in_ui": bool(del_ts),
-                                "note_on_edittime": (
-                                    "Present value reflects post-edit state unless an earlier sequence_number "
-                                    "record with the same message_id exists in uncompacted log frames."
-                                    if edit_ts
-                                    else None
-                                ),
-                                "cached_content": norm["cached_content"],
-                            }
-                        )
+                        entry_dict: Dict[str, Any] = {
+                            "epistemic_tier": "OBSERVED",
+                            "schema_detected": schema_tag,
+                            "leveldb_batch_byte_offset": logical_offset,
+                            "leveldb_batch_sequence_number": seq_num,
+                            "leveldb_sequence_number": seq_num + parsed_ops,
+                            "key_sha256": hashlib.sha256(key_bytes).hexdigest(),
+                            "value_sha256": hashlib.sha256(val_bytes).hexdigest(),
+                            "message_id": norm["message_id"],
+                            "sender_mri": norm["sender_mri"],
+                            "composetime": norm["composetime"],
+                            "deletetime": del_ts,
+                            "edittime": edit_ts,
+                            "is_soft_deleted_in_ui": bool(del_ts),
+                            "note_on_edittime": (
+                                "Present value reflects post-edit state unless an earlier sequence_number "
+                                "record with the same message_id exists in uncompacted log frames."
+                                if edit_ts
+                                else None
+                            ),
+                            "cached_content": norm["cached_content"],
+                        }
+                        if "storage_origin" in norm:
+                            entry_dict["storage_origin"] = norm["storage_origin"]
+                        staged_entries.append(entry_dict)
             elif op_type == 0:
                 local_tombstone_ops += 1
                 if tombstones_by_key_hash is not None and len(staged_tombstones) < MAX_WAL_RECOVERED_RECORDS:
@@ -1215,6 +1537,7 @@ def _decode_writebatch_into(
         stats["value_ops_total"] = stats.get("value_ops_total", 0) + local_value_ops
         stats["tombstone_ops_total"] = stats.get("tombstone_ops_total", 0) + local_tombstone_ops
         stats["blink_v8_binary_only_values"] = stats.get("blink_v8_binary_only_values", 0) + local_v8_binary_only
+        stats["generic_fallback_records"] = stats.get("generic_fallback_records", 0) + local_generic_fallback
         if local_truncated:
             stats["recovered_truncated"] = 1
     if tombstones_by_key_hash is not None:
@@ -1289,12 +1612,20 @@ def inspect_chromium_storage_path(
 
     log_files: List[Path] = []
     ldb_files: List[Path] = []
+    manifest_dirs: Dict[Path, Dict[str, Any]] = {}
     non_regular_sstable_entries = 0
     unreadable_or_symlink_logs = 0
     blob_files_count = 0
     sqlite_files_count = 0
     scanned_files = 0
     scan_truncated = False
+
+    def _man_dir_entry(dp: Path) -> Dict[str, Any]:
+        ent = manifest_dirs.get(dp)
+        if ent is None:
+            ent = {"current": None, "manifests": []}
+            manifest_dirs[dp] = ent
+        return ent
 
     def _is_sqlite_artifact(name_lower: str, suffix_lower: str) -> bool:
         return (
@@ -1317,8 +1648,9 @@ def inspect_chromium_storage_path(
         for dirpath, dirnames, filenames in os.walk(target, followlinks=False):
             dirnames.sort()
             filenames.sort()
+            cur_dp = Path(dirpath)
             try:
-                rel_parts = Path(dirpath).relative_to(target).parts
+                rel_parts = cur_dp.relative_to(target).parts
             except ValueError:
                 rel_parts = ()
             in_blob_subdir = target_is_blob_dir or any(
@@ -1330,7 +1662,7 @@ def inspect_chromium_storage_path(
                     scan_truncated = True
                     dirnames[:] = []
                     break
-                p = Path(dirpath) / fname
+                p = cur_dp / fname
                 try:
                     pst = os.lstat(p)
                 except OSError:
@@ -1348,11 +1680,17 @@ def inspect_chromium_storage_path(
                         blob_files_count += 1
                     elif _is_sqlite_artifact(name_low, suf):
                         sqlite_files_count += 1
+                    elif clean_fname.upper() == "CURRENT" or _MANIFEST_NAME_RE.match(clean_fname):
+                        _man_dir_entry(cur_dp)["non_regular"] = True
                     continue
                 if suf == ".log":
                     log_files.append(p)
                 elif suf in (".ldb", ".sst"):
                     ldb_files.append(p)
+                elif clean_fname.upper() == "CURRENT":
+                    _man_dir_entry(cur_dp)["current"] = p
+                elif m_man := _MANIFEST_NAME_RE.match(clean_fname):
+                    _man_dir_entry(cur_dp)["manifests"].append((int(m_man.group(1)), p))
                 elif in_blob_subdir or suf == ".blob":
                     blob_files_count += 1
                 elif _is_sqlite_artifact(name_low, suf) or _has_sqlite3_magic(p):
@@ -1399,6 +1737,9 @@ def inspect_chromium_storage_path(
     oversize_logs_skipped = 0
     schemas_seen: Dict[str, int] = {}
 
+    generic_fallback_total = 0
+    probe_generic = schema_mode == "auto"
+
     for lf in log_files:
         try:
             raw_log = read_bounded_bytes(lf, max_mb=max_mb, redact=redact, nofollow=True)
@@ -1410,12 +1751,13 @@ def inspect_chromium_storage_path(
             continue
         if not raw_log:
             continue
-        parsed = parse_leveldb_wal(raw_log, schema_mode=schema_mode)
+        parsed = parse_leveldb_wal(raw_log, schema_mode=schema_mode, probe_generic_fallback=probe_generic)
         valid_wal_frames += parsed["valid_physical_frames"]
         wal_corrupted_frames += parsed["corrupted_frames_count"]
         wal_tombstone_ops += parsed["writebatch_tombstone_ops_seen"]
         carvable_records += parsed["recovered_records_count"]
         v8_binary_only_values += parsed["blink_v8_non_json_values_skipped"]
+        generic_fallback_total += parsed.get("generic_fallback_records_count", 0)
         for rec in parsed["recovered_records"]:
             st = str(rec.get("schema_detected", "unknown"))
             schemas_seen[st] = schemas_seen.get(st, 0) + 1
@@ -1423,9 +1765,71 @@ def inspect_chromium_storage_path(
                 soft_deleted_records += 1
 
     from starshield.leveldb_sstable import (
+        MAX_SUBSTORES_RECONCILED,
+        _parse_numeric_file_stem,
         make_store_budget,
+        parse_leveldb_manifest,
         parse_leveldb_sstable,
     )
+
+    present_ldb_nums_by_dir: Dict[Path, set[int]] = {}
+    for sf_p in ldb_files:
+        fnum_p = _parse_numeric_file_stem(sf_p.name)
+        if fnum_p is not None:
+            present_ldb_nums_by_dir.setdefault(sf_p.parent, set()).add(fnum_p)
+
+    present_log_nums_by_dir: Dict[Path, set[int]] = {}
+    for lf_p in log_files:
+        lnum_p = _parse_numeric_file_stem(lf_p.name)
+        if lnum_p is not None:
+            present_log_nums_by_dir.setdefault(lf_p.parent, set()).add(lnum_p)
+
+    manifest_corrupted_or_missing = 0
+    for _m_dp, m_ent in manifest_dirs.items():
+        if m_ent.get("non_regular"):
+            manifest_corrupted_or_missing += 1
+            continue
+        cur_p = m_ent["current"]
+        mans: List[Tuple[int, Path]] = m_ent["manifests"]
+        chosen_man: Path | None = None
+        if cur_p is not None:
+            try:
+                cur_target = (
+                    read_bounded_bytes(cur_p, max_mb=1, redact=redact, nofollow=True)
+                    .decode("utf-8", errors="ignore")
+                    .rstrip("\r\n")
+                    .rstrip(" .")
+                )
+                for _mn, mp in mans:
+                    if mp.name.rstrip(" .") == cur_target:
+                        chosen_man = mp
+                        break
+                if chosen_man is None:
+                    manifest_corrupted_or_missing += 1
+            except (OSError, ValueError):
+                manifest_corrupted_or_missing += 1
+        elif mans:
+            mans.sort(key=lambda x: x[0])
+            chosen_man = mans[-1][1]
+
+        if chosen_man is not None:
+            try:
+                m_raw = read_bounded_bytes(chosen_man, max_mb=max_mb, redact=redact, nofollow=True)
+                m_sum = parse_leveldb_manifest(m_raw)
+                if m_sum["corrupted_frames_count"] > 0 or m_sum["version_edits_applied"] == 0:
+                    manifest_corrupted_or_missing += max(1, m_sum["corrupted_frames_count"])
+                else:
+                    act_fnums = set(m_sum["active_file_levels"].keys())
+                    missing_fnums = act_fnums - present_ldb_nums_by_dir.get(_m_dp, set())
+                    if missing_fnums:
+                        manifest_corrupted_or_missing += len(missing_fnums)
+                    m_log_num = m_sum["log_number"]
+                    if m_log_num is not None and m_log_num > 0:
+                        dir_logs = present_log_nums_by_dir.get(_m_dp, set())
+                        if not any(ln >= m_log_num for ln in dir_logs):
+                            manifest_corrupted_or_missing += 1
+            except (OSError, ValueError):
+                manifest_corrupted_or_missing += 1
 
     verified_sstables = 0
     unreadable_or_oversize_sstables = 0
@@ -1434,17 +1838,63 @@ def inspect_chromium_storage_path(
     sstable_zstd_blocks = 0
     sstable_carvable_records = 0
     sstable_tombstone_entries = 0
-    sst_budget = make_store_budget()
+    sst_budgets_by_dir: Dict[Path, Dict[str, int]] = {}
+    global_precheck_budget = make_store_budget(
+        snappy_bytes=128 * 1024 * 1024,
+        materialized_bytes=256 * 1024 * 1024,
+        max_ops=500_000,
+    )
+    seen_sst_inodes: Dict[Tuple[int, int, str], Dict[str, Any]] = {}
 
     for sf in ldb_files:
         if _has_leveldb_sstable_magic(sf):
             verified_sstables += 1
+        if sf.parent not in sst_budgets_by_dir and len(sst_budgets_by_dir) >= MAX_SUBSTORES_RECONCILED:
+            scan_truncated = True
+            continue
+        if (
+            global_precheck_budget["remaining"] <= 0
+            or global_precheck_budget["materialized_remaining"] <= 0
+            or global_precheck_budget["ops_remaining"] <= 0
+        ):
+            scan_truncated = True
+            continue
         try:
-            raw_sst = read_bounded_bytes(sf, max_mb=max_mb, redact=redact, nofollow=True)
-        except (ValueError, OSError):
+            sf_st = os.lstat(sf)
+            inode_key = (sf_st.st_dev, sf_st.st_ino, schema_mode)
+        except OSError:
             unreadable_or_oversize_sstables += 1
             continue
-        sst_parsed = parse_leveldb_sstable(raw_sst, schema_mode=schema_mode, budget_state=sst_budget)
+        if inode_key in seen_sst_inodes:
+            sst_parsed = seen_sst_inodes[inode_key]
+        else:
+            try:
+                raw_sst = read_bounded_bytes(sf, max_mb=max_mb, redact=redact, nofollow=True)
+            except (ValueError, OSError):
+                unreadable_or_oversize_sstables += 1
+                continue
+            sst_budget = sst_budgets_by_dir.get(sf.parent)
+            if sst_budget is None:
+                sst_budget = make_store_budget(
+                    snappy_bytes=min(64 * 1024 * 1024, global_precheck_budget["remaining"]),
+                    materialized_bytes=min(128 * 1024 * 1024, global_precheck_budget["materialized_remaining"]),
+                    max_ops=min(250_000, global_precheck_budget["ops_remaining"]),
+                )
+                sst_budgets_by_dir[sf.parent] = sst_budget
+            rem_before = sst_budget["remaining"]
+            mat_before = sst_budget["materialized_remaining"]
+            ops_before = sst_budget["ops_remaining"]
+            sst_parsed = parse_leveldb_sstable(
+                raw_sst,
+                schema_mode=schema_mode,
+                budget_state=sst_budget,
+                probe_generic_fallback=probe_generic,
+            )
+            global_precheck_budget["remaining"] -= max(0, rem_before - sst_budget["remaining"])
+            global_precheck_budget["materialized_remaining"] -= max(0, mat_before - sst_budget["materialized_remaining"])
+            global_precheck_budget["ops_remaining"] -= max(0, ops_before - sst_budget["ops_remaining"])
+            if not sst_parsed["budget_exceeded"]:
+                seen_sst_inodes[inode_key] = sst_parsed
         sstable_blocks_verified += sst_parsed["data_blocks_verified"]
         sstable_corrupted_blocks += sst_parsed["corrupted_blocks_count"]
         sstable_zstd_blocks += sst_parsed["zstd_unsupported_blocks_count"]
@@ -1452,11 +1902,16 @@ def inspect_chromium_storage_path(
         sstable_carvable_records += sst_parsed["recovered_records_count"]
         carvable_records += sst_parsed["recovered_records_count"]
         v8_binary_only_values += sst_parsed["blink_v8_non_json_values_skipped"]
+        generic_fallback_total += sst_parsed.get("generic_fallback_records_count", 0)
         for rec in sst_parsed["recovered_records"]:
             st = str(rec.get("schema_detected", "unknown"))
             schemas_seen[st] = schemas_seen.get(st, 0) + 1
             if rec.get("is_soft_deleted_in_ui"):
                 soft_deleted_records += 1
+
+    generic_json_records_available = (
+        generic_fallback_total if (schema_mode == "auto" and carvable_records == 0) else 0
+    )
 
     total_sstables_detected = len(ldb_files) + non_regular_sstable_entries
     all_sstables_healthy = (
@@ -1465,6 +1920,7 @@ def inspect_chromium_storage_path(
         and unreadable_or_oversize_sstables == 0
         and sstable_corrupted_blocks == 0
         and sstable_zstd_blocks == 0
+        and manifest_corrupted_or_missing == 0
     )
 
     if (
@@ -1487,8 +1943,16 @@ def inspect_chromium_storage_path(
         verdict = "PARTIAL"
         guidance = (
             "Carvable records are recoverable from LevelDB .log / Snappy .ldb tables, alongside "
-            "damaged/Zstandard SSTable blocks, external .blob entries, co-located SQLite storage files, "
-            f"binary-only Blink V8 values, oversize files, or capped directory scans outside v{__version__} scope."
+            "damaged/Zstandard SSTable blocks, MANIFEST/WAL corruption, external .blob entries, "
+            "co-located SQLite storage files, binary-only Blink V8 values, oversize files, or "
+            f"capped directory scans outside v{__version__} scope."
+        )
+    elif generic_json_records_available > 0:
+        verdict = "PARTIAL"
+        guidance = (
+            f"Zero messaging/B2B auto-schema records found, but {generic_json_records_available} generic JSON "
+            "or key-value record(s) (e.g. browser extension storage or custom app state) are carvable by "
+            "re-running with `--schema generic-json` (`schema_mode='generic-json'`)."
         )
     else:
         verdict = "NO_GO_COMPACTED_OR_UNSUPPORTED"
@@ -1501,7 +1965,7 @@ def inspect_chromium_storage_path(
             "stores, inspect with sqlite3."
         )
 
-    return {
+    out_report: Dict[str, Any] = {
         "epistemic_tier": "OBSERVED",
         "tool_version": f"starshield-forensics/{__version__}",
         "target_label": "[REDACTED_TARGET_PATH]" if redact else str(target),
@@ -1513,7 +1977,9 @@ def inspect_chromium_storage_path(
         "valid_wal_physical_frames": valid_wal_frames,
         "wal_corrupted_frames_count": wal_corrupted_frames,
         "wal_tombstone_ops_count": wal_tombstone_ops,
+        "manifest_corrupted_or_missing_count": manifest_corrupted_or_missing,
         "carvable_json_records_count": carvable_records,
+        "generic_json_records_available": generic_json_records_available,
         "soft_deleted_json_records_count": soft_deleted_records,
         "schemas_detected_counts": schemas_seen,
         "compacted_sstable_files_detected": total_sstables_detected,
@@ -1528,3 +1994,4 @@ def inspect_chromium_storage_path(
         "blink_v8_non_json_values_detected": v8_binary_only_values,
         "intake_guidance": guidance,
     }
+    return out_report

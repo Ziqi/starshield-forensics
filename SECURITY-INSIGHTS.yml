@@ -86,11 +86,11 @@ repository:
       url: https://github.com/Ziqi/starshield-forensics/blob/main/LICENSE
       expression: MIT
     distribution-points:
-      - uri: https://github.com/Ziqi/starshield-forensics/releases/tag/v0.4.0
+      - uri: https://github.com/Ziqi/starshield-forensics/releases/tag/v0.4.1
         comment: >
-          Official GitHub Release v0.4.0 with CI-rebuilt reproducible starshield.pyz (SLSA Build Level 3),
-          maintainer Ed25519-signed wheel & sdist, and SPDX 2.3 SBOM.
-      - uri: pkg:pypi/starshield-forensics@0.4.0
+          Official GitHub Release v0.4.1 with runner-built reproducible starshield.pyz, wheel, sdist,
+          and SPDX 2.3 SBOM (SLSA Build Level 3 + dual-verified maintainer Ed25519 SHA256SUMS.sig).
+      - uri: pkg:pypi/starshield-forensics@0.4.1
         comment: Python package identifier published via PyPI Trusted Publisher PEP 740 (stdlib-only runtime).
       - uri: https://doi.org/10.5281/zenodo.24145804
         comment: "CERN Zenodo Concept DOI (currently resolves to archived v0.3.7 record DOI 10.5281/zenodo.24156262)."
@@ -99,13 +99,13 @@ repository:
         predicate-uri: https://slsa.dev/provenance/v1
         location: https://github.com/Ziqi/starshield-forensics/attestations
         comment: Sigstore Fulcio X.509 and Rekor transparency log attestations verifiable via gh attestation verify.
-      - name: SLSA Build Level 3 Isolated Provenance (starshield.pyz)
+      - name: SLSA Build Level 3 Isolated Provenance (pyz, wheel, sdist & SBOM)
         predicate-uri: https://slsa.dev/provenance/v0.2
-        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.4.0/multiple.intoto.jsonl
-        comment: Isolated SLSA v0.2 Level 3 provenance for CI-rebuilt starshield.pyz via slsa-framework/slsa-github-generator; wheel and sdist rely on offline Ed25519 SHA256SUMS.sig + PyPI PEP 740.
+        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.4.1/multiple.intoto.jsonl
+        comment: Isolated SLSA v0.2 Level 3 provenance for runner-built starshield.pyz, wheel, sdist, and SBOM via slsa-framework/slsa-github-generator, dual-verified against offline Ed25519 SHA256SUMS.sig.
       - name: Release SPDX 2.3 SBOM
         predicate-uri: https://spdx.dev/Document/v2.3
-        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.4.0/starshield-forensics-0.4.0.spdx.json
+        location: https://github.com/Ziqi/starshield-forensics/releases/download/v0.4.1/starshield-forensics-0.4.1.spdx.json
         comment: Deterministic ISO/IEC 5962:2021 SPDX 2.3 JSON Software Bill of Materials.
   security:
     assessments:

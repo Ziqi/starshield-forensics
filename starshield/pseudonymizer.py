@@ -8,13 +8,16 @@ Architectural Security Invariants:
      `starshield mcp` is NOT a prompt-injection detector or sanitizer. Instead, in default masked
      mode, free-form chat/document prose is strictly withheld (`[WITHHELD_IN_STRUCTURAL_MCP_MODE]`),
      and only deterministic structural skeletons (byte offsets, sequence numbers, soft-delete flags,
-     session-tagged `<ENTITY_9F3A_01>` handles, mathematically validated `<IBAN_GB_9F3A_01>` /
-     `<TRC20_9F3A_01>` tokens, and numeric currency amounts) enter the LLM context window.
-  2. Cross-Case Anti-Collision Session Fingerprints (`<CATEGORY_[CC_]<TAG4>_NN>`):
-     Every placeholder embeds a 4-hex-character uppercase `session_tag` (e.g., `<IBAN_GB_9F3A_01>`,
-     `<TRC20_9F3A_01>`) plus 2-letter ISO country codes on IBAN/BIC tokens. During offline
-     `starshield detokenize`, tokens bearing a foreign `session_tag` are left unexpanded and
-     explicitly flagged to prevent cross-case evidentiary contamination.
+     session-tagged `<ENTITY_9F3AC41D_01>` handles, mathematically validated `<IBAN_GB_9F3AC41D_01>` /
+     `<TRC20_9F3AC41D_01>` tokens, and numeric currency amounts) enter the LLM context window.
+  2. Cross-Case Anti-Collision Session Fingerprints (`<CATEGORY_[CC_]<TAG8>_NN>`):
+     Every placeholder embeds an 8-hex-character uppercase `session_tag` by default (e.g.,
+     `<IBAN_GB_9F3AC41D_01>`, `<TRC20_9F3AC41D_01>`; vault loader and `detokenize` remain backward-
+     compatible with 4..8-hex session tags) plus 2-letter ISO country codes on IBAN/BIC tokens.
+     Past `MAX_TOKENS_PER_CATEGORY` (10,000), assignments degrade to one-way `<..._OVR_HMAC12>`
+     overflow tokens that are intentionally omitted from the reverse vault to bound RAM/vault size.
+     During offline `starshield detokenize`, tokens bearing a foreign `session_tag` or one-way
+     `_OVR_` marker are left unexpanded and explicitly flagged to prevent cross-case contamination.
   3. One-Way MCP Airlock & `0600` Jump-Box Hygiene:
      Reverse lookup stays in RAM by default and is written to disk ONLY when `--vault-file` is
      explicitly supplied (`os.open` with `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW`, `0600`).
@@ -42,7 +45,7 @@ from starshield import __version__
 from starshield.ioc_validators import extract_validated_iocs
 from starshield.leveldb_log import SafeDiagnosticError, dumps_strict_json, sanitize_utf8_str
 
-MAX_VAULT_BYTES = 4 * 1024 * 1024
+MAX_VAULT_BYTES = 16 * 1024 * 1024
 MAX_TOKENS_PER_CATEGORY = 10000
 MAX_EXTRACTED_AMOUNTS = 64
 
@@ -52,8 +55,8 @@ def _parse_bounded_vault_int(num_str: str) -> int:
         raise ValueError("Vault integer exceeds bounded 64-digit safety limit")
     return int(num_str)
 
-_SESSION_TAG_RE = re.compile(r"^[0-9A-F]{4}$")
-_TOKEN_PLACEHOLDER_RE = re.compile(r"<([A-Z0-9_]+)_([0-9A-F]{4})_([0-9]{2,5}|OVR_[0-9A-F]{12})>")
+_SESSION_TAG_RE = re.compile(r"^[0-9A-F]{4,8}$")
+_TOKEN_PLACEHOLDER_RE = re.compile(r"<([A-Z0-9_]+)_([0-9A-F]{4,8})_([0-9]{2,5}|OVR_[0-9A-F]{12})>")
 
 _CURRENCY_AMOUNT_NUM_PAT = (
     r"(?:"
@@ -96,7 +99,7 @@ def extract_currency_amounts(text: str) -> List[str]:
 
 
 class SessionPseudonymizer:
-    """Deterministic per-session order-preserving placeholder mapper (`<CATEGORY_[CC_]<TAG4>_NN>`)."""
+    """Deterministic per-session order-preserving placeholder mapper (`<CATEGORY_[CC_]<TAG8>_NN>`)."""
 
     def __init__(
         self,
@@ -106,10 +109,10 @@ class SessionPseudonymizer:
         if session_tag is not None:
             clean_tag = session_tag.strip().upper()
             if not _SESSION_TAG_RE.fullmatch(clean_tag):
-                raise ValueError("session_tag must be exactly 4 uppercase hexadecimal characters")
+                raise ValueError("session_tag must be 4 to 8 uppercase hexadecimal characters")
             self.session_tag = clean_tag
         else:
-            self.session_tag = secrets.token_hex(2).upper()
+            self.session_tag = secrets.token_hex(4).upper()
 
         self.session_id = session_id or f"ss_{self.session_tag.lower()}_{secrets.token_hex(6)}"
         self._cat_counters: Dict[str, int] = {}
@@ -119,7 +122,7 @@ class SessionPseudonymizer:
         self._cap_exceeded_categories: set[str] = set()
 
     def assign(self, category: str, raw_value: str) -> str:
-        """Assign `<CATEGORY_[CC_]<TAG4>_NN>`, falling back to `<..._OVR_HMAC12>` past 10,000 entries."""
+        """Assign `<CATEGORY_[CC_]<TAG8>_NN>`, falling back to one-way `<..._OVR_HMAC12>` past 10,000 entries."""
         if not raw_value:
             return ""
         clean_raw = sanitize_utf8_str(raw_value)
@@ -166,7 +169,7 @@ class SessionPseudonymizer:
         return self.pseudonymize_ioc_dict(raw_iocs)
 
     def pseudonymize_ioc_dict(self, raw_iocs: Dict[str, Any]) -> Dict[str, Any]:
-        """Map an unredacted IOC dictionary to `<CATEGORY_[CC_]<TAG4>_NN>` placeholders."""
+        """Map an unredacted IOC dictionary to `<CATEGORY_[CC_]<TAG8>_NN>` placeholders."""
         out = copy.deepcopy(raw_iocs)
         bucket_cats = (
             ("luhn_validated_cards", "CARD"),
@@ -217,7 +220,7 @@ class SessionPseudonymizer:
             "token_to_raw": dict(self._token_to_raw),
         }
 
-    def save_vault_atomic(self, vault_path: Path) -> None:
+    def save_vault_atomic(self, vault_path: Path, *, allow_overwrite: bool = False) -> None:
         """Persist reverse token vault locally with strict `0600` permissions, `O_NOFOLLOW`, and anti-clobber check."""
         target = Path(vault_path)
         existing_st: os.stat_result | None = None
@@ -232,7 +235,7 @@ class SessionPseudonymizer:
             if existing_st.st_nlink > 1:
                 raise SafeDiagnosticError("Refusing to overwrite multi-hardlink target with token vault")
             try:
-                load_vault_strict(target)
+                _old_map, _old_tag, old_session_id = _load_vault_with_session(target)
             except (
                 OSError,
                 ValueError,
@@ -244,6 +247,11 @@ class SessionPseudonymizer:
                 raise SafeDiagnosticError(
                     "Refusing to overwrite existing file: target is not a valid starshield-token-vault/v1 file"
                 ) from exc
+            if not allow_overwrite and old_session_id != self.session_id:
+                raise SafeDiagnosticError(
+                    "Refusing to overwrite existing token vault from a different session "
+                    "(pass --vault-overwrite or choose a new --vault-file path)"
+                )
 
         parent = target.parent
         if parent.is_symlink():
@@ -309,8 +317,8 @@ class SessionPseudonymizer:
             raise
 
 
-def load_vault_strict(vault_path: Path) -> Tuple[Dict[str, str], str]:
-    """Load `starshield-token-vault/v1` JSON (`O_NOFOLLOW`) and return `(token_to_raw, session_tag)`."""
+def _load_vault_with_session(vault_path: Path) -> Tuple[Dict[str, str], str, str]:
+    """Load `starshield-token-vault/v1` JSON (`O_NOFOLLOW`, UID + `0600` verified) returning `(map, tag, session_id)`."""
     target = Path(vault_path)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(target), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | nofollow)
@@ -318,6 +326,10 @@ def load_vault_strict(vault_path: Path) -> Tuple[Dict[str, str], str]:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise OSError("Token vault path must be a regular file")
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            raise SafeDiagnosticError("Refusing to load token vault owned by a different OS user")
+        if os.name == "posix" and (st.st_mode & 0o077) != 0:
+            raise SafeDiagnosticError("Refusing to load token vault with group/world permissions (expected 0600)")
         if st.st_size > MAX_VAULT_BYTES:
             raise ValueError(f"Token vault exceeds {MAX_VAULT_BYTES} byte safety limit")
         with os.fdopen(fd, "rb") as fh:
@@ -338,7 +350,8 @@ def load_vault_strict(vault_path: Path) -> Tuple[Dict[str, str], str]:
         raise ValueError("Invalid or unsupported StarShield token vault schema")
     session_tag = str(parsed.get("session_tag", "")).strip().upper()
     if not _SESSION_TAG_RE.fullmatch(session_tag):
-        raise ValueError("Token vault missing valid 4-hex 'session_tag'")
+        raise ValueError("Token vault missing valid 4-to-8-hex 'session_tag'")
+    session_id = str(parsed.get("session_id", "")).strip()
     mapping = parsed.get("token_to_raw")
     if not isinstance(mapping, dict):
         raise ValueError("Token vault missing 'token_to_raw' mapping object")
@@ -349,6 +362,12 @@ def load_vault_strict(vault_path: Path) -> Tuple[Dict[str, str], str]:
             m = _TOKEN_PLACEHOLDER_RE.fullmatch(k)
             if m and m.group(2) == session_tag:
                 out[k] = v
+    return out, session_tag, session_id
+
+
+def load_vault_strict(vault_path: Path) -> Tuple[Dict[str, str], str]:
+    """Load `starshield-token-vault/v1` JSON (`O_NOFOLLOW`) and return `(token_to_raw, session_tag)`."""
+    out, session_tag, _session_id = _load_vault_with_session(vault_path)
     return out, session_tag
 
 
@@ -359,7 +378,7 @@ def detokenize_text(
     expected_session_tag: str | None = None,
 ) -> Tuple[str, int, List[str]]:
     """
-    Single-pass non-recursive substitution of `<CATEGORY_[CC_]<TAG4>_NN>` placeholders.
+    Single-pass non-recursive substitution of `<CATEGORY_[CC_]<TAG8>_NN>` (and legacy 4..8-hex) placeholders.
 
     Returns `(restored_text, restored_count, unmatched_or_foreign_tokens)`. Any placeholder
     carrying a foreign `session_tag` (e.g., from a different case) is left untouched and

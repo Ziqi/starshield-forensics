@@ -6,8 +6,8 @@
 
 | Version | Supported |
 | :--- | :--- |
-| `0.4.0` (latest) | Supported |
-| `< 0.4.0` | Upgrade straight to `0.4.0` (CLI & JSON schemas remain backwards-compatible) |
+| `0.4.1` (latest) | Supported |
+| `< 0.4.1` | Upgrade straight to `0.4.1` (CLI & JSON schemas remain backwards-compatible) |
 
 ## 2. Private Vulnerability Reporting (`vulnerability_report_private`)
 
@@ -36,8 +36,8 @@ The repository maintains the following machine-verifiable engineering controls (
 | Control Domain | Repository Implementation & Verifiable Artifacts |
 | :--- | :--- |
 | **Access Control & Governance** | Documented roles & continuity policy ([`GOVERNANCE.md`](./GOVERNANCE.md)), mandatory DCO 1.1 sign-off ([`CONTRIBUTING.md`](./CONTRIBUTING.md)), [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md), protected `main` rulesets, and SHA-pinned GitHub Actions with `permissions: contents: read` & `persist-credentials: false`. |
-| **Build & Release Integrity** | Bit-for-bit reproducible `starshield.pyz` ([`scripts/build_reproducible.py`](./scripts/build_reproducible.py)) built directly from source in GitHub Actions with isolated **SLSA Build Level 3** provenance (`multiple.intoto.jsonl`) and Sigstore (`Fulcio`/`Rekor`) `/attestations`; canonical `.whl` and `.tar.gz` distributions verified via offline OpenSSH `Ed25519` maintainer signatures ([`KEYS.pub`](./KEYS.pub) + `SHA256SUMS.sig`) and **PyPI Trusted Publisher PEP 740** digital attestations. |
+| **Build & Release Integrity** | Bit-for-bit reproducible `starshield.pyz`, PEP 427 `.whl`, and zero-UID PEP 625 `.tar.gz` sdist ([`scripts/build_reproducible.py`](./scripts/build_reproducible.py)) built directly from checked-out tag source in GitHub Actions (gated on green CI + dual-verified against offline OpenSSH `Ed25519` maintainer signatures [`KEYS.pub`](./KEYS.pub) + `SHA256SUMS.sig`) with isolated **SLSA Build Level 3** provenance (`multiple.intoto.jsonl`), Sigstore (`Fulcio`/`Rekor`) `/attestations`, and **PyPI Trusted Publisher PEP 740** digital attestations. |
 | **SBOM, Licensing & Archival** | Deterministic ISO/IEC 5962:2021 **SPDX 2.3 SBOM** ([`scripts/generate_spdx_sbom.py`](./scripts/generate_spdx_sbom.py) with `--verify --require-dists` version & artifact parity checks), 100% **FSFE REUSE 3.3** SPDX compliance ([`REUSE.toml`](./REUSE.toml)), [`SECURITY-INSIGHTS.yml`](./SECURITY-INSIGHTS.yml), and CERN Zenodo Concept DOI (`10.5281/zenodo.24145804`, currently resolving to archived `v0.3.7`). |
-| **Quality, SAST & Continuous Fuzzing** | Zero third-party runtime dependencies (`Python >= 3.10` stdlib only), automated `CodeQL` + `Bandit` SAST, `>= 85%` statement coverage gate, **ClusterFuzzLite / Atheris** continuous fuzzing, and 542-vector specification/cross-tool harness ([`scripts/verify_cross_tool_forensics.py`](./scripts/verify_cross_tool_forensics.py)). |
+| **Quality, SAST & Continuous Fuzzing** | Zero third-party runtime dependencies (`Python >= 3.10` stdlib only), automated `CodeQL` + `Bandit` SAST, `>= 85%` statement coverage gate, **ClusterFuzzLite / Atheris** continuous fuzzing, and 611-vector specification/cross-tool harness ([`scripts/verify_cross_tool_forensics.py`](./scripts/verify_cross_tool_forensics.py): `13` external differential vectors vs Google `dfindexeddb` & `Pillow` + `598` specification & check-digit vectors). |
 | **Vulnerability Handling & CVD** | Private HTTPS reporting via GitHub Security Advisories (§2), 48-hour acknowledgment SLA, 14-day High/Critical remediation target with mandatory regression tests (§3), and coordinated GHSA/CVE advisory & signed patch publication (§4). |
 | **Security Architecture & Privacy** | Structured NIST IR 7608 assurance case ([`SECURITY_ASSURANCE_CASE.md`](./SECURITY_ASSURANCE_CASE.md)), strictly offline read-only execution (`0` network sockets, `0` LLM runtime), bounded `zlib` & Snappy decompression (`CWE-409`), and default output masking. |

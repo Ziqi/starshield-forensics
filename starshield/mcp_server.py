@@ -6,9 +6,9 @@ Deterministic, strictly offline Model Context Protocol (MCP) stdio server for `s
 Exposes eight read-only deterministic tools over JSON-RPC 2.0 (`stdio`):
   1. `starshield_demo`                    — Clean-room synthetic showcase across all engines (keyed HMAC mode)
   2. `starshield_precheck_leveldb`        — Zero-PII GO/PARTIAL/NO_GO_COMPACTED_OR_UNSUPPORTED LevelDB check
-  3. `starshield_parse_leveldb_log`       — Structural `.log` WAL carver (`<IBAN_GB_9F3A_01>`, zero raw prose)
+  3. `starshield_parse_leveldb_log`       — Structural `.log` WAL carver (`<IBAN_GB_9F3AC41D_01>`, zero raw prose)
   4. `starshield_parse_leveldb_store`     — Structural `.ldb`/`.log`/`MANIFEST` live-vs-tombstone reconciler
-  5. `starshield_triage_json`             — Structural exported JSON triage (`<ENTITY_9F3A_01>`, zero raw prose)
+  5. `starshield_triage_json`             — Structural exported JSON triage (`<ENTITY_9F3AC41D_01>`, zero raw prose)
   6. `starshield_inspect_image_tamper`    — PNG/JPEG ICC & 8BIM container structure observation (not tamper proof)
   7. `starshield_validate_financial_iocs` — Offline Luhn, IBAN, SWIFT, ABA, RF, LEI, TRON & EIP-55 syntax check
   8. `starshield_inspect_pdf_tamper`      — ISO 32000 PDF container structure & incremental revision observation
@@ -17,8 +17,8 @@ Privacy-by-Default Structural Airlock:
   `starshield mcp` is NOT a natural-language prompt-injection detector or sanitizer. Instead, default
   masked mode withholds raw free-form chat/document prose and emits only deterministic structural
   skeletons (byte offsets, sequence numbers, soft-delete flags, visible numeric currency amounts, and
-  session-tagged `<IBAN_GB_9F3A_01>` / `<TRC20_9F3A_01>` / `<ENTITY_9F3A_01>` placeholders whose IBAN/BIC
-  tokens preserve 2-letter ISO country codes). Note: `starshield_demo` uses keyed HMAC masking
+  session-tagged `<IBAN_GB_9F3AC41D_01>` / `<TRC20_9F3AC41D_01>` / `<ENTITY_9F3AC41D_01>` placeholders whose
+  IBAN/BIC tokens preserve 2-letter ISO country codes). Note: `starshield_demo` uses keyed HMAC masking
   (`[REDACTED_HMAC:...]`) while scrubbing CLI `--unredacted` flag hints from prose placeholders.
   Reverse `detokenize` and `shred-vault` are local CLI commands and are NEVER exposed over MCP.
 """
@@ -126,7 +126,7 @@ MCP_TOOLS: list[Dict[str, Any]] = [
             "Castagnoli CRC32C (polynomial 0x82F63B78, mask delta 0xA282EAD8) verification. Default masked "
             "mode withholds raw free-form prose and returns deterministic structural skeletons (offsets, "
             "soft-delete flags, visible numeric currency amounts, and session-fingerprinted "
-            "<IBAN_GB_XXXX_01> / <ENTITY_XXXX_01> placeholders whose IBAN/BIC tokens expose 2-letter ISO "
+            "<IBAN_GB_XXXXXXXX_01> / <ENTITY_XXXXXXXX_01> placeholders whose IBAN/BIC tokens expose 2-letter ISO "
             "country codes)."
         ),
         "inputSchema": {
@@ -153,10 +153,10 @@ MCP_TOOLS: list[Dict[str, Any]] = [
         "title": "Parse LevelDB Store (.ldb SSTable + MANIFEST + .log) Structural Skeleton",
         "description": (
             "Carve compacted Snappy/uncompressed LevelDB .ldb SSTables, MANIFEST VersionEdits, and .log "
-            "write-ahead logs offline, reconciling LIVE_ACTIVE, UI_SOFT_DELETED, and "
+            "write-ahead logs offline, reconciling LIVE_ACTIVE, UI_SOFT_DELETED, LIVENESS_INDETERMINATE, and "
             "TOMBSTONED_HISTORICAL_RECOVERED records with per-block Castagnoli CRC32C verification. Default "
             "masked mode withholds raw free-form prose and returns structural skeletons with visible numeric "
-            "currency amounts and session-fingerprinted <IBAN_GB_XXXX_01> / <ENTITY_XXXX_01> placeholders."
+            "currency amounts and session-fingerprinted <IBAN_GB_XXXXXXXX_01> / <ENTITY_XXXXXXXX_01> placeholders."
         ),
         "inputSchema": {
             "type": "object",
@@ -169,7 +169,7 @@ MCP_TOOLS: list[Dict[str, Any]] = [
                     "type": "string",
                     "enum": list(VALID_SCHEMA_MODES),
                     "default": "auto",
-                    "description": "Record schema filter (default: auto; generic-json includes LocalStorage KV text).",
+                    "description": "Record schema filter (default: auto, including Chromium LocalStorage KV; generic-json includes all JSON/KV).",
                 },
             },
             "required": ["target_path"],
@@ -183,8 +183,8 @@ MCP_TOOLS: list[Dict[str, Any]] = [
         "description": (
             "Enumerate soft-deleted and edited records in exported messaging JSON artifacts. Default "
             "masked mode withholds raw chat prose and emits deterministic structural skeletons with "
-            "visible numeric currency amounts and session-fingerprinted <IBAN_GB_XXXX_01> / "
-            "<TRC20_XXXX_01> / <ENTITY_XXXX_01> tokens (IBAN/BIC tokens expose 2-letter ISO country codes)."
+            "visible numeric currency amounts and session-fingerprinted <IBAN_GB_XXXXXXXX_01> / "
+            "<TRC20_XXXXXXXX_01> / <ENTITY_XXXXXXXX_01> tokens (IBAN/BIC tokens expose 2-letter ISO country codes)."
         ),
         "inputSchema": {
             "type": "object",
@@ -598,6 +598,18 @@ def handle_mcp_message(
     if method == "initialize":
         requested_ver = params.get("protocolVersion")
         negotiated_ver = requested_ver if requested_ver in SUPPORTED_MCP_VERSIONS else DEFAULT_MCP_VERSION
+        init_instructions = (
+            "Deterministic, strictly offline, read-only digital forensics & container structure "
+            "server. Default masked mode withholds free-form chat/document prose and emits only "
+            "structural skeletons + session-tagged <CATEGORY_XXXXXXXX_NN> placeholders so raw PII, "
+            "filenames, and file hashes never enter LLM context."
+            if redact
+            else (
+                "WARNING: UNREDACTED LAB MODE ACTIVE (--unredacted). Privacy airlock is disabled; "
+                "tool responses contain raw unmasked identifiers, filenames, file hashes, timestamps, "
+                "and plaintext prose. Offline isolated lab use only."
+            )
+        )
         return {
             "jsonrpc": "2.0",
             "id": req_id,
@@ -608,12 +620,7 @@ def handle_mcp_message(
                     "name": "starshield-forensics",
                     "version": __version__,
                 },
-                "instructions": (
-                    "Deterministic, strictly offline, read-only digital forensics & container provenance "
-                    "server. Default masked mode withholds free-form chat/document prose and emits only "
-                    "structural skeletons + session-tagged <CATEGORY_XXXX_NN> placeholders so raw PII, "
-                    "filenames, and file hashes never enter LLM context."
-                ),
+                "instructions": init_instructions,
             },
         }
 
@@ -722,9 +729,8 @@ def _read_next_rpc_frame(instream: BinaryIO) -> Tuple[bytes | None, str, Dict[st
             continue
 
         if stripped.lower().startswith(b"content-length:"):
-            try:
-                content_len = int(stripped.split(b":", 1)[1].strip())
-            except ValueError:
+            raw_cl = stripped.split(b":", 1)[1].strip()
+            if not raw_cl or len(raw_cl) > 16 or not raw_cl.isascii() or not raw_cl.isdigit():
                 return (
                     b"",
                     "content-length",
@@ -734,6 +740,7 @@ def _read_next_rpc_frame(instream: BinaryIO) -> Tuple[bytes | None, str, Dict[st
                         "error": {"code": -32700, "message": "Malformed Content-Length header"},
                     },
                 )
+            content_len = int(raw_cl)
             if content_len < 0 or content_len > MAX_RPC_FRAME_BYTES:
                 return (
                     b"",
@@ -763,6 +770,16 @@ def _read_next_rpc_frame(instream: BinaryIO) -> Tuple[bytes | None, str, Dict[st
                     break
                 hdr_lines += 1
                 hdr_bytes += len(hdr_line)
+                if hdr_line.strip().lower().startswith(b"content-length:"):
+                    return (
+                        b"",
+                        "content-length",
+                        {
+                            "jsonrpc": "2.0",
+                            "id": None,
+                            "error": {"code": -32600, "message": "Duplicate Content-Length header in MCP frame"},
+                        },
+                    )
                 if len(hdr_line) > 4096 or hdr_lines > 32 or hdr_bytes > 16384:
                     return (
                         b"",
@@ -795,17 +812,25 @@ def run_mcp_stdio_server(
     max_mb: int = MAX_DEFAULT_MB,
     salt: bytes | None = None,
     vault_file: Path | None = None,
+    allow_vault_overwrite: bool = False,
     instream: BinaryIO | None = None,
     outstream: BinaryIO | None = None,
 ) -> int:
     """Run the deterministic StarShield MCP server over stdio until EOF."""
     if max_mb < 1:
         raise SafeDiagnosticError("--max-mb safety limit must be >= 1 MiB")
+    if not redact and vault_file is not None:
+        raise SafeDiagnosticError("--unredacted cannot be combined with --vault-file")
+    if vault_file is not None:
+        _guard_vault_not_same_file(vault_file, None)
+
     reader = instream if instream is not None else sys.stdin.buffer
     writer = outstream if outstream is not None else sys.stdout.buffer
     session_salt = salt if salt is not None else secrets.token_bytes(32)
     session_pseudo = SessionPseudonymizer() if redact else None
     last_saved_total = 0
+    seen_target_paths: list[Path] = []
+    vault_overwrite_ok = allow_vault_overwrite
 
     while True:
         raw_bytes, framing, frame_err = _read_next_rpc_frame(reader)
@@ -827,6 +852,59 @@ def run_mcp_stdio_server(
                 },
                 framing,
             )
+            continue
+
+        pre_guard_error: Dict[str, Any] | None = None
+        if (
+            vault_file is not None
+            and isinstance(parsed, dict)
+            and parsed.get("method") == "tools/call"
+            and "id" in parsed
+        ):
+            raw_params = parsed.get("params")
+            call_args = raw_params.get("arguments") if isinstance(raw_params, dict) else None
+            if isinstance(call_args, dict):
+                for pk in ("target_path", "log_path", "json_path", "image_path", "pdf_path"):
+                    pv = call_args.get(pk)
+                    if isinstance(pv, str) and pv.strip():
+                        cand_p = Path(pv)
+                        if cand_p not in seen_target_paths:
+                            seen_target_paths.append(cand_p)
+            try:
+                _guard_vault_not_same_file(vault_file, None)
+                for seen_p in seen_target_paths:
+                    _guard_vault_not_same_file(vault_file, seen_p)
+            except (OSError, ValueError) as g_exc:
+                err_txt = format_masked_error(g_exc) if redact else str(g_exc)
+                raw_id = parsed.get("id")
+                safe_id = (
+                    raw_id
+                    if (
+                        raw_id is None
+                        or (
+                            isinstance(raw_id, (str, int, float))
+                            and not isinstance(raw_id, bool)
+                            and not (isinstance(raw_id, float) and (math.isnan(raw_id) or math.isinf(raw_id)))
+                        )
+                    )
+                    else None
+                )
+                pre_guard_error = {
+                    "jsonrpc": "2.0",
+                    "id": safe_id,
+                    "result": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": dumps_strict_json({"error": err_txt, "masked_mode": redact}, indent=None),
+                            }
+                        ],
+                        "isError": True,
+                    },
+                }
+
+        if pre_guard_error is not None:
+            _write_rpc_frame(writer, pre_guard_error, framing)
             continue
 
         try:
@@ -870,14 +948,28 @@ def run_mcp_stdio_server(
             and sum(session_pseudo.token_counts().values()) > last_saved_total
         ):
             try:
-                call_args = (parsed.get("params") or {}).get("arguments")
-                if isinstance(call_args, dict):
-                    for pk in ("target_path", "log_path", "json_path", "image_path", "pdf_path"):
-                        pv = call_args.get(pk)
-                        if isinstance(pv, str) and pv.strip():
-                            _guard_vault_not_same_file(vault_file, Path(pv))
-                session_pseudo.save_vault_atomic(vault_file)
+                _guard_vault_not_same_file(vault_file, None)
+                for seen_p in seen_target_paths:
+                    _guard_vault_not_same_file(vault_file, seen_p)
+                session_pseudo.save_vault_atomic(vault_file, allow_overwrite=vault_overwrite_ok)
+                vault_overwrite_ok = True
                 last_saved_total = sum(session_pseudo.token_counts().values())
+            except SafeDiagnosticError as v_sec_exc:
+                v_err_msg = format_masked_error(v_sec_exc) if redact else str(v_sec_exc)
+                if response is not None and "id" in response:
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": response["id"],
+                        "result": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": dumps_strict_json({"error": v_err_msg, "masked_mode": redact}, indent=None),
+                                }
+                            ],
+                            "isError": True,
+                        },
+                    }
             except (OSError, ValueError, RecursionError, MemoryError):
                 vault_persist_warning = (
                     "Unable to persist local token vault; check --vault-file parent directory and permissions"
@@ -886,4 +978,13 @@ def run_mcp_stdio_server(
         if response is not None:
             if vault_persist_warning is not None and isinstance(response.get("result"), dict):
                 response["result"]["vault_persist_warning"] = vault_persist_warning
+                res_content = response["result"].get("content")
+                if isinstance(res_content, list) and res_content and isinstance(res_content[0], dict):
+                    try:
+                        inner_obj = json.loads(str(res_content[0].get("text", "")))
+                        if isinstance(inner_obj, dict):
+                            inner_obj["vault_persist_warning"] = vault_persist_warning
+                            res_content[0]["text"] = dumps_strict_json(inner_obj, indent=2)
+                    except (ValueError, TypeError):
+                        pass
             _write_rpc_frame(writer, response, framing)

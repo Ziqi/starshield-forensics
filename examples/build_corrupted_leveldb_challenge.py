@@ -6,7 +6,7 @@
 Deterministic Clean-Room Corrupted `.log + .ldb + MANIFEST` Challenge Builder.
 
 Generates `examples/corrupted_leveldb_challenge/` (< 64 KB total, 100% synthetic specification
-vectors) exercising every v0.4.0 capability:
+vectors) exercising every v0.4.1 capability:
   1. Multi-record `MANIFEST-000002` replay (`NewFile` + `DeletedFile`) distinguishing active L0/L1
      `.ldb` SSTables (`000003.ldb`, `000005.ldb`) from an uncollected disk orphan (`000001.ldb`).
   2. Snappy-compressed multi-block `.ldb` (`000003.ldb`) where Data Block 0 is intact and Data
