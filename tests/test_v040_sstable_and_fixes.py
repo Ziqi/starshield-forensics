@@ -38,6 +38,10 @@ _REPO_ROOT_STR = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT_STR not in sys.path:
     sys.path.insert(0, _REPO_ROOT_STR)
 
+
+def _trace_scale() -> float:
+    return 8.0 if (sys.gettrace() is not None or "coverage" in sys.modules) else 1.0
+
 from starshield import __version__  # noqa: E402
 from starshield.cli import main as cli_main  # noqa: E402
 from starshield.ioc_validators import extract_validated_iocs  # noqa: E402
@@ -731,7 +735,7 @@ class TestV040SSTableAndFixes(unittest.TestCase):
         t0 = time.perf_counter()
         res_amp = parse_leveldb_sstable(amp_sst)
         elapsed_amp = time.perf_counter() - t0
-        self.assertLess(elapsed_amp, 0.5)
+        self.assertLess(elapsed_amp, 0.5 * _trace_scale())
         self.assertLessEqual(res_amp["corrupted_blocks_count"], 2)
 
         # 3. [H1/M1] 107B >16MiB Snappy block does NOT poison store budget; mid-stream failed Snappy charges upfront
@@ -969,7 +973,7 @@ class TestV040SSTableAndFixes(unittest.TestCase):
             (wal_flood_dir / "000003.log").write_bytes(encode_logical_record_across_blocks(flood_batch))
             t_w0 = time.perf_counter()
             res_wf = parse_leveldb_store(wal_flood_dir, redact=True)
-            self.assertLess(time.perf_counter() - t_w0, 2.0)
+            self.assertLess(time.perf_counter() - t_w0, 2.0 * _trace_scale())
             self.assertGreaterEqual(res_wf["corrupted_blocks_or_frames_count"], 1)
 
             # 3. [R2-M1 & R2-M2] Unreferenced orphan tombstone does NOT override active live record; `lost/` folded as orphan
@@ -1007,7 +1011,7 @@ class TestV040SSTableAndFixes(unittest.TestCase):
         t_pdf0 = time.perf_counter()
         many_eof_pdf = b"%PDF-1.7\n1 0 obj\n" + (b"%%EOF\n" * 20000) + b"endobj\n%%EOF\n"
         rep_many = inspect_pdf_container(many_eof_pdf, "many_eof.pdf")
-        self.assertLess(time.perf_counter() - t_pdf0, 1.0)
+        self.assertLess(time.perf_counter() - t_pdf0, 1.0 * _trace_scale())
         self.assertEqual(rep_many["incremental_revision_count"], 1)
 
         base_inc = build_synthetic_incremental_pdf()
@@ -1175,7 +1179,7 @@ class TestV040SSTableAndFixes(unittest.TestCase):
         t_sx = time.perf_counter()
         sx_spaces_pdf = b"%PDF-1.7\n1 0 obj\n<<startxref" + (b" " * 150000) + b">>\nendobj\n%%EOF\n"
         inspect_pdf_container(sx_spaces_pdf, "sx.pdf")
-        self.assertLess(time.perf_counter() - t_sx, 0.5)
+        self.assertLess(time.perf_counter() - t_sx, 0.5 * _trace_scale())
 
         bad_hex_pdf = b"%PDF-1.7\n1 0 obj<<>>endobj\n<\ntrailer\n<<>>\nstartxref\n0\n%%EOF\n>\n"
         rep_bh = inspect_pdf_container(bad_hex_pdf, "bh.pdf")
