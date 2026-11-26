@@ -593,10 +593,11 @@ class TestV041PostReleaseFixes(unittest.TestCase):
 
         # 2. Sub-second O(N log N) span scaling & O(N) hyphen-chain scaling (`GB00-...` / `RF00-...`),
         #    plus card recovery adjacent to claimed date/IBAN and leading quantity prefix
+        trace_budget_sec = 8.0 if sys.gettrace() is not None else 2.0
         t0 = time.perf_counter()
         dense_text = "GB82WEST12345698765432,DEUTDEFF;123456789 " * 6000
         dense_res = extract_validated_iocs(dense_text, redact=False)
-        self.assertLess(time.perf_counter() - t0, 2.0)
+        self.assertLess(time.perf_counter() - t0, trace_budget_sec)
         self.assertEqual(dense_res["mod97_validated_ibans"], ["GB82WEST12345698765432"])
 
         t_hyph = time.perf_counter()
@@ -604,7 +605,7 @@ class TestV041PostReleaseFixes(unittest.TestCase):
         self.assertEqual(
             extract_validated_iocs("RF00-" * 25000 + "RF00", redact=False)["iso11649_creditor_references"], []
         )
-        self.assertLess(time.perf_counter() - t_hyph, 2.0)
+        self.assertLess(time.perf_counter() - t_hyph, trace_budget_sec)
 
         c_date = extract_validated_iocs("card 4111 1111 1111 1111 01-12-26", redact=False)
         self.assertEqual(c_date["luhn_validated_cards"], ["4111111111111111"])
